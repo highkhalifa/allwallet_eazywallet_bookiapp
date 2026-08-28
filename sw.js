@@ -7,7 +7,7 @@
    there fails the whole install and leaves you with no offline support at
    all — which is exactly what went wrong before. */
 
-const CACHE = "wallet-v40";
+const CACHE = "wallet-v41";
 
 // let the page ask us to activate immediately when the user taps "Update now"
 self.addEventListener("message", (e) => {
