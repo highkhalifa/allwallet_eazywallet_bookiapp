@@ -1,3 +1,5 @@
+const BUILD_VERSION = "0.19.0";
+
 /* Keeps the app on the phone.
 
    Once installed, tapping the home screen icon works with no connection:
@@ -7,11 +9,15 @@
    there fails the whole install and leaves you with no offline support at
    all — which is exactly what went wrong before. */
 
-const CACHE = "wallet-v46";
+const CACHE = "wallet-v50";
 
 // let the page ask us to activate immediately when the user taps "Update now"
 self.addEventListener("message", (e) => {
   if (e.data && e.data.type === "SKIP_WAITING") self.skipWaiting();
+  // the waiting worker reports its version so the page can name the update
+  if (e.data && e.data.type === "WHICH_VERSION" && e.ports && e.ports[0]) {
+    e.ports[0].postMessage({ version: BUILD_VERSION });
+  }
 });
 
 self.addEventListener("install", (e) => {
