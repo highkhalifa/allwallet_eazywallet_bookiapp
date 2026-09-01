@@ -1,4 +1,4 @@
-const BUILD_VERSION = "0.30.0";
+const BUILD_VERSION = "0.33.0";
 
 /* Keeps the app on the phone.
 
@@ -9,7 +9,7 @@ const BUILD_VERSION = "0.30.0";
    there fails the whole install and leaves you with no offline support at
    all — which is exactly what went wrong before. */
 
-const CACHE = "wallet-v67";
+const CACHE = "wallet-v70";
 
 // let the page ask us to activate immediately when the user taps "Update now"
 self.addEventListener("message", (e) => {
