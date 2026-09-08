@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { storage, sync } from "./storage";
 import {
-  Check, Info, Moon, Sun, Home as HomeIcon, Users, Utensils, Receipt, Sparkles,
+  ClipboardPaste, Check, Info, Moon, Sun, Home as HomeIcon, Users, Utensils, Receipt, Sparkles,
   Building2, Baby, Landmark, Package, Car, Heart, Send, Camera, Trash2, Loader2,
   Plus, X, Undo2, Wallet, ScrollText, SlidersHorizontal, TrendingDown,
   AlertTriangle, PiggyBank, ArrowDownLeft, ChevronDown, Pencil, GripVertical,
@@ -275,6 +275,103 @@ export function localParse(raw, config, today) {
   };
 }
 
+
+/* ---------- reading a pile of bank alerts ---------- */
+
+/* iOS gives no app access to SMS — not native ones, not Shortcuts, and
+   certainly not a web page. What it does allow is reading the clipboard on a
+   tap. So: select the messages, copy, press one button here. Parsed locally,
+   which is both private and more reliable than reading pixels. */
+const SMS_MONTHS = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6,
+                     jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
+
+export function parseAlerts(raw, config, today) {
+  const chunks = String(raw)
+    .split(/\n{2,}|(?=\b(?:AED|\u062f\.\u0625)\s?[\d,]+\.?\d*\s+(?:has been|was|is)\b)/i)
+    .map((c) => c.trim())
+    .filter((c) => c.length > 8);
+
+  const out = [];
+  for (const c of chunks) {
+    const low = c.toLowerCase();
+
+    // an amount attached to a currency marker beats a bare number
+    const cur = c.match(/(?:AED|\u062f\.\u0625|DHS?)\s*([\d,]+(?:\.\d{1,2})?)/i)
+      || c.match(/([\d,]+\.\d{2})\b/);
+    if (!cur) continue;
+    const amount = Number(cur[1].replace(/,/g, ""));
+    if (!(amount > 0)) continue;
+
+    // 12/08/2026, 12-08-26, or 12 Aug
+    let date = today;
+    const dmy = c.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+    const dMon = c.match(/\b(\d{1,2})[\s\-]([A-Za-z]{3})[A-Za-z]*\b/);
+    if (dmy) {
+      const [, d, mo, y] = dmy;
+      const yy = y.length === 2 ? 2000 + Number(y) : Number(y);
+      date = `${yy}-${pad(Number(mo))}-${pad(Number(d))}`;
+    } else if (dMon && SMS_MONTHS[dMon[2].toLowerCase()]) {
+      date = `${today.slice(0, 4)}-${pad(SMS_MONTHS[dMon[2].toLowerCase()])}-${pad(Number(dMon[1]))}`;
+    }
+
+    /* The merchant is what follows "at" or "to", cut at the first word that
+       belongs to the sentence rather than the name. Without this you get
+       "AZAYAM RESTAURANT on 25/08/2026" as the note. */
+    const TAIL = /\s+\b(on|using|from|with|via|at|for|to|your|dated|ref|through)\b.*$/i;
+    let note = "";
+    const at = c.match(/\b(?:at|to)\s+([A-Z0-9][^\n.,;]{2,44})/);
+    if (at) note = at[1];
+    if (!note) {
+      const caps = c.match(/\b[A-Z][A-Z0-9&'.\- ]{3,30}\b/g) || [];
+      // ignore the currency code and other sentence words in capitals
+      const skip = /^(AED|DHS|THE|YOUR|CARD|ACCOUNT|CREDIT|DEBIT|BANK)$/i;
+      note = (caps.filter((w) => !skip.test(w.trim())).sort((a, b) => b.length - a.length)[0] || "");
+    }
+    note = note.replace(TAIL, "").replace(/[\s.,;:-]+$/, "").replace(/\s{2,}/g, " ").trim();
+
+    /* Some alerts name no merchant at all — a salary credit, or an instalment
+       being taken. Falling back to the amount ("AED 9") reads like a bug, so
+       describe what it is instead. */
+    if (/^(AED|DHS)\b/i.test(note) || note.length < 3) note = "";
+    if (!note) {
+      if (/\bsalary\b/i.test(c)) note = "Salary";
+      else if (/\binstal?ment\b/i.test(c)) {
+        const card = (config.cards || []).find((k) =>
+          low.includes(String(k.name || "").toLowerCase().split(" ")[0]));
+        note = card ? `${card.name} instalment` : "Instalment";
+      }
+      else if (/\bcredited|deposit|transfer from\b/i.test(c)) note = "Money in";
+      else if (/\brefund|reversal\b/i.test(c)) note = "Refund";
+      else note = "Bank alert";
+    }
+    note = note.slice(0, 40);
+
+    const credited = /\b(credited|received|deposit|salary|refund|reversal|transfer from)\b/i.test(c);
+    const isCard = /\b(credit card|card ending|card no|tabby|tamara|visa|mastercard)\b/i.test(c);
+
+    let cardId = "";
+    if (isCard) {
+      const named = (config.cards || []).find((k) =>
+        low.includes(String(k.name || "").toLowerCase().split(" ")[0]));
+      cardId = named ? named.id : ((config.cards || [])[0] || {}).id || "";
+    }
+
+    // reuse the same category matching a typed entry gets, learned words included
+    const guess = localParse(`${amount} ${note}`, config, date);
+
+    out.push({
+      id: `${Date.now()}-${out.length}`,
+      kind: credited ? "income" : "expense",
+      amount, date, note,
+      categoryId: credited ? "__income" : (guess ? guess.catId : "other"),
+      src: !credited && isCard ? "card" : "bank",
+      cardId: !credited && isCard ? cardId : "",
+      keep: true,
+    });
+  }
+  return out;
+}
+
 /* Plainly: what did that become? Shown right after logging so a wrong guess
    is caught in the moment, not weeks later in a reconciliation. */
 export function describe(entry, config) {
@@ -309,7 +406,10 @@ export function computeMetrics({ tx, config, cycle, today, past, future }) {
      one slice per cycle, for as many cycles as the plan runs. */
   const sliceOf = (t) => {
     if (!t.plan || !t.plan.total || t.plan.total < 2) return null;
-    const n = monthsBetween(t.date, cycle.start);
+    /* "On my next statement" means nothing is due in the month you bought it,
+       so the whole schedule shifts a cycle later. */
+    const shift = t.plan.startsNow === false ? 1 : 0;
+    const n = monthsBetween(t.date, cycle.start) - shift;
     if (n < 0 || n >= t.plan.total) return 0;          // outside the plan's life
     return n === 0 ? t.plan.first : t.plan.slice;
   };
@@ -376,6 +476,31 @@ export function computeMetrics({ tx, config, cycle, today, past, future }) {
      your first entry, which is nonsense. */
   const left = planning ? Math.min(budget - budgetedSpent, cashLeft) : cashLeft;
 
+  /* What you've promised, as opposed to what you've paid. Cash-basis
+     categories understate this: three plans at 2,000 each look calm month by
+     month until they overlap. This is the number that warns you. */
+  const plans = tx.filter((t) => t.kind === "expense" && t.plan && t.plan.total > 1);
+  let committed = 0, dueNext = 0;
+  const dueByCycle = {};
+
+  for (const t of plans) {
+    const paid = tx.filter((p) => p.kind === "cardpay" && p.planId === t.plan.id).length;
+    if (paid >= t.plan.total) continue;
+    const owedOnPlan = t.amount - (paid === 0 ? 0 : t.plan.first + t.plan.slice * (paid - 1));
+    committed += Math.max(0, owedOnPlan);
+
+    // which cycles the remaining payments land in
+    const shift = t.plan.startsNow === false ? 1 : 0;
+    for (let k = paid; k < t.plan.total; k++) {
+      const n = monthsBetween(t.date, cycle.start);
+      const offset = k + shift - n;
+      if (offset < 0) continue;
+      const amt = k === 0 ? t.plan.first : t.plan.slice;
+      dueByCycle[offset] = (dueByCycle[offset] || 0) + amt;
+      if (offset === 1) dueNext += amt;
+    }
+  }
+
   const cards = (config.cards || []).map((c) => {
     const owed = tx.reduce((s, t) => {
       if (t.cardId !== c.id) return s;
@@ -392,6 +517,7 @@ export function computeMetrics({ tx, config, cycle, today, past, future }) {
     byCat, budget, budgetedSpent, spent, spentToday, income, cashOut, cardOut,
     cardPaid, cardBalance, cardPaidAll, bankedAll, cards, unassignedCard,
     plannedIncome, otherIncome, planning,
+    committed, dueNext, dueByCycle, planCount: plans.length,
     cashLeft, left,
     planLeft: planning ? budget - budgetedSpent : income - spent,
     awaited: planning ? Math.max(0, budget - plannedIncome) : 0,
@@ -426,6 +552,26 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.43.0", items: [
+    "Paste a pile of bank messages and it reads them all at once \u2014 select them in Messages, copy, tap the clipboard button",
+    "Every row is listed with its date, amount, card and category so you confirm before anything saves",
+    "Skip any row you don't want; nothing is added until you press Add",
+  ]},
+  { v: "0.42.0", items: [
+    "The Owed on cards tile now shows what you've promised as well as what you owe today",
+    "Tap it for when each instalment lands \u2014 this cycle, next, the one after, later",
+    "A warning when instalments will take more than a quarter of what you earn: three small plans can overlap into one large one",
+  ]},
+  { v: "0.41.0", items: [
+    "A purchase on instalments stays visible in its category from the day you make it, even before any payment is due",
+    "Its amount shows a dash while nothing is charged yet, so the total stays honest",
+    "Opening a category shows what's committed there on instalments, charged as it's paid",
+  ]},
+  { v: "0.40.2", items: [
+    "Fixed: choosing \u2018on my next statement\u2019 still charged a payment in the month you bought it",
+    "Fixed a category showing 0 while the total above it counted the purchase \u2014 both now use the same figure",
+    "A purchase whose payments haven't started says \u2018starts next cycle\u2019 instead of showing nothing",
+  ]},
   { v: "0.40.1", items: [
     "The daily bars now show the instalment slice too \u2014 they were still spiking with the full purchase while the totals showed the monthly share",
     "A payment carried from an earlier cycle appears on the day it falls due",
@@ -1089,6 +1235,32 @@ function Home(props) {
   const [err, setErr] = useState("");
   const [settled, setSettled] = useState("");
   const [confirmPay, setConfirmPay] = useState(null);
+  const [rows, setRows] = useState(null);      // a pasted batch awaiting review
+  const [pasteMsg, setPasteMsg] = useState("");
+
+  /* Safari will hand over the clipboard on a tap, which is the closest thing
+     to reading messages that iOS allows anyone. Select the alerts in Messages,
+     copy, then press this. */
+  const pasteAlerts = async () => {
+    setPasteMsg("");
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (e) {
+      setPasteMsg("Couldn't read the clipboard \u2014 copy the messages first, then allow paste.");
+      return;
+    }
+    if (!text || text.trim().length < 8) {
+      setPasteMsg("Nothing on the clipboard. Copy your bank messages first.");
+      return;
+    }
+    const found = parseAlerts(text, config, cycleToday);
+    if (!found.length) {
+      setPasteMsg("Couldn't find any amounts in that. Paste the message text itself.");
+      return;
+    }
+    setRows(found);
+  };
 
   const text = draft;
   const setText = setDraft;
@@ -1148,9 +1320,18 @@ function Home(props) {
      the day it falls due, not on the original purchase date. */
   /* What this purchase costs THIS cycle: a slice if it's on a plan, the whole
      thing otherwise. The row shows the slice, with the full price beside it. */
+  /* Still owed on a plan, whether or not this cycle is paying any of it. */
+  const pendingOn = (t) => {
+    if (!t.plan || t.plan.total < 2) return 0;
+    const done = tx.filter((p) => p.kind === "cardpay" && p.planId === t.plan.id).length;
+    if (done >= t.plan.total) return 0;
+    return t.amount - (done === 0 ? 0 : t.plan.first + t.plan.slice * (done - 1));
+  };
+
   const chargeFor = (t) => {
     if (!t.plan || t.plan.total < 2) return t.amount;
-    const n = monthsBetween(t.date, cycle.start);
+    const shift = t.plan.startsNow === false ? 1 : 0;
+    const n = monthsBetween(t.date, cycle.start) - shift;
     if (n < 0 || n >= t.plan.total) return 0;
     return n === 0 ? t.plan.first : t.plan.slice;
   };
@@ -1310,6 +1491,21 @@ function Home(props) {
         { label: "Paid off this cycle", value: money(m.cardPaid), tone: "in" },
       ],
       note: "This runs across every cycle, not just this one — a card balance doesn't reset on payday.",
+    },
+    committed: {
+      title: "What you've promised",
+      rows: [
+        { label: `Across ${m.planCount} instalment ${m.planCount === 1 ? "plan" : "plans"}`,
+          value: money(m.committed), tone: "out", total: true },
+        { label: "Due this cycle", value: money(m.dueByCycle[0] || 0) },
+        { label: "Due next cycle", value: money(m.dueNext) },
+        { label: "The cycle after", value: money(m.dueByCycle[2] || 0) },
+        { label: "Later than that",
+          value: money(Math.max(0, m.committed - (m.dueByCycle[0] || 0) - m.dueNext - (m.dueByCycle[2] || 0))) },
+      ],
+      note: <>Categories charge an instalment as you pay it, which keeps a month honest —
+        but it also hides what you've taken on. This is the total still to pay.
+        {m.dueNext > 0 && <> Next cycle alone takes <b className="num">{money(m.dueNext)}</b>.</>}</>,
     },
     ring: {
       title: "The ring",
@@ -1537,12 +1733,18 @@ function Home(props) {
           </span>
         </button>
 
-        <button onClick={() => setMaths("cards")} className="statCard" aria-label="Owed on cards">
+        <button onClick={() => setMaths(m.committed > 0 ? "committed" : "cards")}
+          className="statCard" aria-label="Owed on cards">
           <span className="eyebrow">Owed on cards</span>
           <span className={`num ${m.cardBalance > 0 ? "over" : ""}`}
             style={{ fontSize: 22, fontWeight: 600, marginTop: 5 }}>
             {money(m.cardBalance)}
           </span>
+          {m.committed > 0 && (
+            <span style={{ fontSize: 11.5, marginTop: 3, color: "var(--amber)" }}>
+              + {money(m.committed)} promised
+            </span>
+          )}
           <span style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
             {m.cardOut > 0 && m.cardPaid > 0
               ? <>{money(m.cardOut)} added · <b style={{ color: "var(--leaf)" }}>{money(m.cardPaid)} paid off</b></>
@@ -1585,6 +1787,25 @@ function Home(props) {
             </div>
           )});
         });
+
+        /* Month by month each plan looks small. Together they can be most of a
+           salary, and nothing else on screen would say so. */
+        const monthlyIncome = Math.max(
+          m.plannedIncome,
+          (config.incomes || []).reduce((sum, i) => sum + (Number(i.amount) || 0), 0)
+        );
+        if (m.dueNext > 0 && monthlyIncome > 0 && m.dueNext / monthlyIncome > 0.25) {
+          items.push({ key: `commit:${Math.round(m.dueNext)}`, node: (
+            <div className="flag" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--line))" }}>
+              <CreditCard size={17} color="var(--amber)" style={{ marginTop: 2 }} />
+              <div className="txt">
+                Instalments take <b className="num">{money(m.dueNext)}</b> next cycle —
+                about {Math.round((m.dueNext / monthlyIncome) * 100)}% of what you expect to earn.
+                {" "}<b className="num">{money(m.committed)}</b> is still to pay in total.
+              </div>
+            </div>
+          )});
+        }
 
         if (m.income > 0 && Math.abs(m.unallocated) > 1) {
           items.push({ key: `unalloc:${Math.round(m.unallocated)}`, node: (
@@ -1680,6 +1901,10 @@ function Home(props) {
             </div>
           ) : (
             <div className="askRow">
+              <button className="send ghostBtn" onClick={pasteAlerts}
+                aria-label="Paste bank messages" title="Paste bank messages">
+                <ClipboardPaste size={17} />
+              </button>
               <input value={text} onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
                 placeholder="45 groceries, salary came in\u2026"
@@ -1767,6 +1992,84 @@ function Home(props) {
           </div>
         </div>
 
+        {rows && rows.length > 0 && (
+          <div className="panel" style={{ marginTop: 10 }}>
+            <div style={{ padding: "14px 15px 0", display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="eyebrow" style={{ flex: 1 }}>
+                Found {rows.filter((r) => r.keep).length} of {rows.length} — check before adding
+              </span>
+              <button className="icon" onClick={() => setRows(null)} aria-label="Discard">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div style={{ maxHeight: 320, overflowY: "auto", padding: "10px 15px 0" }}>
+              {rows.map((r, i) => {
+                const cat = config.categories.find((c) => c.id === r.categoryId);
+                const card = (config.cards || []).find((c) => c.id === r.cardId);
+                return (
+                  <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9,
+                    padding: "9px 0", borderTop: i ? "1px solid var(--line)" : "none",
+                    opacity: r.keep ? 1 : .4 }}>
+                    <button className="icon" style={{ padding: 2 }}
+                      onClick={() => setRows(rows.map((x, n) => n === i ? { ...x, keep: !x.keep } : x))}
+                      aria-label={r.keep ? "Skip this one" : "Include this one"}>
+                      <span style={{ width: 19, height: 19, borderRadius: 6, display: "flex",
+                        alignItems: "center", justifyContent: "center",
+                        border: `1.5px solid ${r.keep ? "var(--leaf)" : "var(--line)"}`,
+                        background: r.keep ? "var(--leaf)" : "transparent",
+                        color: "var(--leather)" }}>
+                        {r.keep ? <Check size={12} /> : null}
+                      </span>
+                    </button>
+                    <span style={{ color: "var(--muted)", flex: "none", width: 46, fontSize: 12 }}>
+                      {fmtDay(r.date)}
+                    </span>
+                    <span className="payTag" data-src={r.src === "card" ? "card" : "bank"}>
+                      {r.kind === "income" ? "in" : r.src === "card" ? "card" : "cash"}
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: "hidden",
+                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {r.note}
+                      <span style={{ color: "var(--muted)", fontSize: 11, marginLeft: 6 }}>
+                        {r.kind === "income" ? "Money in" : cat ? cat.name : "Other"}
+                        {card ? ` \u00b7 ${card.name}` : ""}
+                      </span>
+                    </span>
+                    <span className="num" style={{ fontSize: 13.5, fontWeight: 600 }}>
+                      {money(r.amount)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ display: "flex", gap: 8, padding: "12px 15px 15px" }}>
+              <button className="btn gold" style={{ flex: 1 }}
+                disabled={!rows.some((r) => r.keep)}
+                onClick={async () => {
+                  const keep = rows.filter((r) => r.keep).map((r) => {
+                    const { keep: _k, ...entry } = r;
+                    return { ...entry, categoryId: entry.categoryId || "other" };
+                  });
+                  const prev = tx;
+                  await saveTx([...keep, ...tx]);
+                  setRows(null);
+                  setToast({ prevTx: prev, prevConfig: config,
+                    filed: { icon: "out", text: `Added ${keep.length} ${keep.length === 1 ? "entry" : "entries"}` } });
+                  dismissToast();
+                }}>
+                Add {rows.filter((r) => r.keep).length}
+              </button>
+              <button className="btn" style={{ flex: 1 }} onClick={() => setRows(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {pasteMsg && (
+          <div className="hint" style={{ color: "var(--amber)" }}>{pasteMsg}</div>
+        )}
+
         {(err || thinking > 0 || settled) && (
           <div className={`hint ${settled ? "settled" : ""}`}
             style={err ? { color: "var(--flare)" } : undefined}>
@@ -1816,14 +2119,22 @@ function Home(props) {
           </div>
 
           {cats.map((c) => {
-            const spent = m.inCycle
-              .filter((t) => t.kind === "expense" && t.categoryId === c.id && filtered(t))
-              .reduce((s, t) => s + t.amount, 0);
+            /* Use the same sliced figure the totals use. Summing full amounts
+               here made a category disagree with the header above it. */
+            const spent = [...m.inCycle.filter((t) => t.kind === "expense"
+                && t.categoryId === c.id && filtered(t)),
+              ...tx.filter((t) => t.kind === "expense" && t.plan && t.date < cycle.start
+                && t.categoryId === c.id && filtered(t))]
+              .reduce((s, t) => s + chargeFor(t), 0);
             const budget = Number(c.budget) || 0;
             const over = budget > 0 && spent > budget;
             const open = openCat === c.id;
+            /* Two different questions: what has this cost me this cycle, and
+               what have I committed to. A plan whose payments haven't started
+               is worth seeing even though it adds nothing to the total. */
             const carried = tx.filter((t) => t.kind === "expense" && t.plan
-              && t.date < cycle.start && t.categoryId === c.id && chargeFor(t) > 0 && filtered(t));
+              && t.date < cycle.start && t.categoryId === c.id && filtered(t)
+              && (chargeFor(t) > 0 || pendingOn(t)));
             const items = [...m.inCycle
               .filter((t) => t.kind === "expense" && t.categoryId === c.id && filtered(t)), ...carried]
               .sort((a, b) => b.date.localeCompare(a.date));
@@ -1863,6 +2174,20 @@ function Home(props) {
                     transition: "transform .3s ease" }} />
                 </div>
 
+                {open && (() => {
+                  const committed = items.reduce((sum, t) => sum + pendingOn(t), 0);
+                  return committed > 0 ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9,
+                      padding: "7px 9px", borderRadius: 9, fontSize: 12,
+                      background: "color-mix(in srgb, var(--amber) 10%, transparent)",
+                      color: "var(--amber)" }}>
+                      <CreditCard size={12} style={{ flex: "none" }} />
+                      <span><b className="num">{money(committed)}</b> committed here on instalments,
+                        charged as it's paid</span>
+                    </div>
+                  ) : null;
+                })()}
+
                 {open && (
                   <div style={{ marginTop: 10 }}>
                     {items.length === 0
@@ -1899,10 +2224,15 @@ function Home(props) {
                               {t.plan && t.plan.total > 1 && (
                                 <span className="planTag">
                                   {money(t.amount)} over {t.plan.total}
+                                  {chargeFor(t) === 0 && t.plan.startsNow === false
+                                    ? " · starts next cycle" : ""}
                                 </span>
                               )}
                             </span>
-                            <span className="num">{money(chargeFor(t))}</span>
+                            <span className="num" style={chargeFor(t) === 0
+                              ? { color: "var(--muted)" } : undefined}>
+                              {chargeFor(t) === 0 ? "—" : money(chargeFor(t))}
+                            </span>
                             <Pencil size={12} style={{ color: "var(--muted)", flex: "none" }} />
                           </div>
                         ))}
