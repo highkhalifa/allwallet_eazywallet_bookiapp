@@ -66,7 +66,7 @@ const money = (n) =>
    Unicode 18.0 encodes it in September 2026, but no phone has the font yet,
    so a character would render as an empty box. An inline SVG shows correctly
    on any device today. Swap this for the character once fonts catch up. */
-const DH = "\u062f.\u0625";   // for template strings, where an SVG can't go
+const DH = "د.إ";   // for template strings, where an SVG can't go
 
 function Dh({ size = "1em", style }) {
   return (
@@ -245,17 +245,44 @@ export function localParse(raw, config, today) {
   const isIncome = INCOME_WORDS.some((w) => low.includes(w))
     || sourceNames.some((n) => low.includes(n));
 
-  /* Words you've taught it by correcting a past entry beat the built-in list —
-     it learns your merchants rather than relying on ones I guessed at. */
   let catId = config.categories[config.categories.length - 1]?.id || "other";
   let matched = false;
-  for (const [word, id] of Object.entries(config.learned || {})) {
-    if (has(id) && low.includes(word)) { catId = id; matched = true; break; }
+
+  /* Naming a category is the clearest signal there is — "600 kid investment"
+     when a Kid investment category exists should never land in Other. Longest
+     name first, so "Flat 2 fund" wins over "Flat 1". */
+  const byName = [...config.categories]
+    .filter((c) => String(c.name || "").trim().length > 2)
+    .sort((a, b) => b.name.length - a.name.length);
+  for (const c of byName) {
+    if (low.includes(String(c.name).toLowerCase().trim())) { catId = c.id; matched = true; break; }
+  }
+
+  /* Then a word you taught it by moving an entry, then the built-in list. */
+  if (!matched) {
+    for (const [word, id] of Object.entries(config.learned || {})) {
+      if (has(id) && low.includes(word)) { catId = id; matched = true; break; }
+    }
   }
   if (!matched) {
     for (const [id, words] of Object.entries(KEYWORDS)) {
-      if (has(id) && words.some((w) => low.includes(w))) { catId = id; break; }
+      if (has(id) && words.some((w) => low.includes(w))) { catId = id; matched = true; break; }
     }
+  }
+
+  /* Still nothing? Try each significant word of every category name, so
+     "kid" or "investment" alone still finds "Kid investment". */
+  if (!matched) {
+    const skip = /^(and|the|for|my|of|to|in|on|other|misc|new|category)$/i;
+    let best = null;
+    for (const c of config.categories) {
+      for (const w of String(c.name || "").toLowerCase().split(/[^a-z؀-ۿ]+/)) {
+        // three letters is enough for a real word like "kid"; two is noise
+        if (w.length < 3 || skip.test(w)) continue;
+        if (low.includes(w) && (!best || w.length > best.w.length)) best = { id: c.id, w };
+      }
+    }
+    if (best) catId = best.id;
   }
 
   const note = raw
@@ -287,7 +314,7 @@ const SMS_MONTHS = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6,
 
 export function parseAlerts(raw, config, today) {
   const chunks = String(raw)
-    .split(/\n{2,}|(?=\b(?:AED|\u062f\.\u0625)\s?[\d,]+\.?\d*\s+(?:has been|was|is)\b)/i)
+    .split(/\n{2,}|(?=\b(?:AED|د\.إ)\s?[\d,]+\.?\d*\s+(?:has been|was|is)\b)/i)
     .map((c) => c.trim())
     .filter((c) => c.length > 8);
 
@@ -296,7 +323,7 @@ export function parseAlerts(raw, config, today) {
     const low = c.toLowerCase();
 
     // an amount attached to a currency marker beats a bare number
-    const cur = c.match(/(?:AED|\u062f\.\u0625|DHS?)\s*([\d,]+(?:\.\d{1,2})?)/i)
+    const cur = c.match(/(?:AED|د\.إ|DHS?)\s*([\d,]+(?:\.\d{1,2})?)/i)
       || c.match(/([\d,]+\.\d{2})\b/);
     if (!cur) continue;
     const amount = Number(cur[1].replace(/,/g, ""));
@@ -377,16 +404,16 @@ export function parseAlerts(raw, config, today) {
 export function describe(entry, config) {
   if (!entry) return null;
   const m0 = (n) => Math.round(n).toLocaleString("en-US");
-  if (entry.kind === "income") return { icon: "in", text: `Money in \u00b7 ${m0(entry.amount)}` };
+  if (entry.kind === "income") return { icon: "in", text: `Money in · ${m0(entry.amount)}` };
   if (entry.kind === "cardpay") {
     const card = (config.cards || []).find((c) => c.id === entry.cardId);
-    return { icon: "pay", text: `Card repayment${card ? ` \u00b7 ${card.name}` : ""} \u00b7 ${m0(entry.amount)}` };
+    return { icon: "pay", text: `Card repayment${card ? ` · ${card.name}` : ""} · ${m0(entry.amount)}` };
   }
   const cat = config.categories.find((c) => c.id === entry.categoryId);
   const how = entry.src === "card" ? "on card" : "from bank";
   return {
     icon: "out",
-    text: `${cat ? cat.name : "Other"} \u00b7 ${how} \u00b7 ${m0(entry.amount)}`,
+    text: `${cat ? cat.name : "Other"} · ${how} · ${m0(entry.amount)}`,
     color: cat ? cat.color : undefined,
   };
 }
@@ -552,14 +579,22 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.44.0", items: [
+    "Naming a category now sends the entry there — “600 kid investment” was landing in Other despite a Kid investment category existing",
+    "Part of a name works too, so “600 kid” finds it",
+    "Order of matching: your category names, then words you've taught it, then the built-in list",
+  ]},
+  { v: "0.43.1", items: [
+    "The stray ? marks in Plan now sit in each section's header instead of taking a line of their own",
+  ]},
   { v: "0.43.0", items: [
-    "Paste a pile of bank messages and it reads them all at once \u2014 select them in Messages, copy, tap the clipboard button",
+    "Paste a pile of bank messages and it reads them all at once — select them in Messages, copy, tap the clipboard button",
     "Every row is listed with its date, amount, card and category so you confirm before anything saves",
     "Skip any row you don't want; nothing is added until you press Add",
   ]},
   { v: "0.42.0", items: [
     "The Owed on cards tile now shows what you've promised as well as what you owe today",
-    "Tap it for when each instalment lands \u2014 this cycle, next, the one after, later",
+    "Tap it for when each instalment lands — this cycle, next, the one after, later",
     "A warning when instalments will take more than a quarter of what you earn: three small plans can overlap into one large one",
   ]},
   { v: "0.41.0", items: [
@@ -568,41 +603,41 @@ const CHANGELOG = [
     "Opening a category shows what's committed there on instalments, charged as it's paid",
   ]},
   { v: "0.40.2", items: [
-    "Fixed: choosing \u2018on my next statement\u2019 still charged a payment in the month you bought it",
-    "Fixed a category showing 0 while the total above it counted the purchase \u2014 both now use the same figure",
-    "A purchase whose payments haven't started says \u2018starts next cycle\u2019 instead of showing nothing",
+    "Fixed: choosing ‘on my next statement’ still charged a payment in the month you bought it",
+    "Fixed a category showing 0 while the total above it counted the purchase — both now use the same figure",
+    "A purchase whose payments haven't started says ‘starts next cycle’ instead of showing nothing",
   ]},
   { v: "0.40.1", items: [
-    "The daily bars now show the instalment slice too \u2014 they were still spiking with the full purchase while the totals showed the monthly share",
+    "The daily bars now show the instalment slice too — they were still spiking with the full purchase while the totals showed the monthly share",
     "A payment carried from an earlier cycle appears on the day it falls due",
   ]},
   { v: "0.40.0", items: [
-    "Instalment purchases are charged one payment per cycle instead of all at once \u2014 a 6,000 fee split over 3 months no longer shows as 6,000 spent in one month",
+    "Instalment purchases are charged one payment per cycle instead of all at once — a 6,000 fee split over 3 months no longer shows as 6,000 spent in one month",
     "The row shows this month's share, with the full price beside it",
     "The card balance still shows the whole amount owed from day one, because it is",
   ]},
   { v: "0.39.4", items: [
     "Transactions inside a category can be tapped to edit, the same as in History",
-    "When your budget is tighter than your cash, the hero now says so \u2014 the two figures differed with no explanation",
+    "When your budget is tighter than your cash, the hero now says so — the two figures differed with no explanation",
   ]},
   { v: "0.39.3", items: [
-    "Fixed the page scrolling while dragging an entry \u2014 the drag now holds the gesture properly",
+    "Fixed the page scrolling while dragging an entry — the drag now holds the gesture properly",
     "Moving your finger before the hold completes scrolls as normal, so nothing is picked up by accident",
     "A short buzz when an entry lifts, so you know it's in hand",
   ]},
   { v: "0.39.2", items: [
     "Drag and drop is back: hold an entry inside a category and drag it onto another",
     "Moving one teaches the app that word, so the next lands there by itself",
-    "Cash and card are colour-tagged \u2014 green for cash, amber for card \u2014 in categories and history",
+    "Cash and card are colour-tagged — green for cash, amber for card — in categories and history",
   ]},
   { v: "0.39.1", items: [
-    "Fixed the rebuild reading the wrong storage keys \u2014 existing data appeared missing but was never touched",
+    "Fixed the rebuild reading the wrong storage keys — existing data appeared missing but was never touched",
     "AI settings are back, and the model is editable for every provider",
   ]},
   { v: "0.39.0", items: [
     "Rebuilt from scratch after the source was lost. Same app, cleaner underneath.",
     "The matcher learns: move an entry to another category and it remembers that word",
-    "Instalments now ask when the first payment falls due \u2014 today for Tabby, next statement for a credit-card plan",
+    "Instalments now ask when the first payment falls due — today for Tabby, next statement for a credit-card plan",
     "Budgets stay optional, and budgeting only some categories works properly",
   ]},
 ];
@@ -957,7 +992,7 @@ function Boundary({ children }) {
 function SyncBadge() {
   const [s, setS] = useState({ ...sync });
   useEffect(() => sync.subscribe(setS), []);
-  const label = s.pending ? "Saving\u2026" : "Saved on this phone";
+  const label = s.pending ? "Saving…" : "Saved on this phone";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11,
       color: "var(--gold)", letterSpacing: ".08em", textTransform: "uppercase", fontWeight: 600 }}>
@@ -1063,7 +1098,7 @@ function AskPayday({ onAnswer }) {
         {valid ? `Start on the ${n}${ord(n)}` : "Enter a day between 1 and 28"}
       </button>
       <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => onAnswer(1)}>
-        I'm not sure \u2014 use the 1st
+        I'm not sure — use the 1st
       </button>
     </div>
   );
@@ -1078,11 +1113,11 @@ function FirstRun({ config, tx, doneFlags, setDoneFlags, onGoPlan, onGoCards }) 
       done: (config.incomes || []).some((i) => Number(i.amount) > 0),
       action: { label: "Open Plan", go: onGoPlan } },
     { key: "cards", title: "Add your cards",
-      body: "Credit cards, Tabby, Tamara \u2014 anything you pay with later.",
+      body: "Credit cards, Tabby, Tamara — anything you pay with later.",
       done: (config.cards || []).length > 0,
       action: { label: "Open Cards", go: onGoCards } },
     { key: "entry", title: "Log your first spend",
-      body: "Type it how you'd say it: \u201c45 groceries\u201d.",
+      body: "Type it how you'd say it: “45 groceries”.",
       done: tx.some((t) => t.kind === "expense") },
     { key: "budgets", title: "Set budgets, if you want them",
       body: "Optional. Without them the app tracks against what you earn instead.",
@@ -1125,7 +1160,7 @@ function FirstRun({ config, tx, doneFlags, setDoneFlags, onGoPlan, onGoCards }) 
               color: mi.done ? "var(--leather)" : "var(--muted)",
               display: "flex", alignItems: "center", justifyContent: "center",
               fontSize: 11, fontWeight: 700 }}>
-              {mi.done ? "\u2713" : mi.locked ? "\u00b7" : i + 1}
+              {mi.done ? "✓" : mi.locked ? "·" : i + 1}
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 14.5, fontWeight: 600 }}>{mi.title}</div>
@@ -1205,17 +1240,60 @@ function Home(props) {
       setDrag({ tx: t, x, y, overCat: "" });
     }, 320);
   };
+  /* Holding near the top or bottom scrolls the page, so you can reach a
+     category that's off screen. Speed rises as you get closer to the edge. */
+  const edgeScroll = useRef(0);
+  const edgeSpeed = useRef(0);
+
+  const setEdgeScroll = (y) => {
+    const h = window.innerHeight;
+    const zone = 110;                       // how close to an edge starts it
+    let speed = 0;
+    if (y < zone) speed = -Math.ceil(((zone - y) / zone) * 14);
+    else if (y > h - zone) speed = Math.ceil(((y - (h - zone)) / zone) * 14);
+    edgeSpeed.current = speed;
+
+    if (speed && !edgeScroll.current) {
+      const step = () => {
+        if (!edgeSpeed.current) { edgeScroll.current = 0; return; }
+        window.scrollBy(0, edgeSpeed.current);
+        /* The finger hasn't moved but the page has, so whatever is under it
+           has changed — re-read the target each frame or the highlight
+           lags behind what you're actually hovering. */
+        setDrag((d) => {
+          if (!d) return d;
+          const el = document.elementFromPoint(d.x, d.y);
+          const holder = el && el.closest ? el.closest("[data-cat]") : null;
+          const over = holder ? holder.dataset.cat : "";
+          return over === d.overCat ? d : { ...d, overCat: over };
+        });
+        edgeScroll.current = requestAnimationFrame(step);
+      };
+      edgeScroll.current = requestAnimationFrame(step);
+    } else if (!speed && edgeScroll.current) {
+      cancelAnimationFrame(edgeScroll.current);
+      edgeScroll.current = 0;
+    }
+  };
+
+  const stopEdgeScroll = () => {
+    edgeSpeed.current = 0;
+    if (edgeScroll.current) { cancelAnimationFrame(edgeScroll.current); edgeScroll.current = 0; }
+  };
+
   const moveDrag = (e) => {
     if (!drag) return;
     if (e.cancelable) e.preventDefault();
     const x = e.touches ? e.touches[0].clientX : e.clientX;
     const y = e.touches ? e.touches[0].clientY : e.clientY;
+    setEdgeScroll(y);
     const el = document.elementFromPoint(x, y);
     const holder = el && el.closest ? el.closest("[data-cat]") : null;
     setDrag((d) => (d ? { ...d, x, y, overCat: holder ? holder.dataset.cat : "" } : d));
   };
   const endDrag = async () => {
     clearTimeout(dragTimer.current);
+    stopEdgeScroll();
     dragRef.current = null;
     if (!drag) return;
     const { tx: moved, overCat } = drag;
@@ -1247,7 +1325,7 @@ function Home(props) {
     try {
       text = await navigator.clipboard.readText();
     } catch (e) {
-      setPasteMsg("Couldn't read the clipboard \u2014 copy the messages first, then allow paste.");
+      setPasteMsg("Couldn't read the clipboard — copy the messages first, then allow paste.");
       return;
     }
     if (!text || text.trim().length < 8) {
@@ -1386,7 +1464,7 @@ function Home(props) {
 
     const guess = localParse(raw, config, cycleToday);
     if (!guess) {
-      setErr("Couldn't find an amount in that. Try \u201c45 groceries\u201d.");
+      setErr("Couldn't find an amount in that. Try “45 groceries”.");
       return;
     }
 
@@ -1422,7 +1500,7 @@ function Home(props) {
       if (splitStart === "now") {
         extra = [{
           id: `${id}-p1`, kind: "cardpay", amount: first, categoryId: "__cardpay",
-          note: `${entry.note} \u2014 payment 1 of ${splitN}`,
+          note: `${entry.note} — payment 1 of ${splitN}`,
           date: entry.date, src: "bank", cardId, planId: id,
         }];
       }
@@ -1432,7 +1510,7 @@ function Home(props) {
     await saveTx([...extra, entry, ...tx]);
 
     setToast({ prevTx, prevConfig: config, filed: describe(entry, config),
-      note: guess.fromPlan ? `No amount typed \u2014 used ${money(guess.amount)} from your plan` : null });
+      note: guess.fromPlan ? `No amount typed — used ${money(guess.amount)} from your plan` : null });
     dismissToast();
 
     /* Repayment is a monthly action, so it doesn't stay selected — leaving it
@@ -1458,26 +1536,26 @@ function Home(props) {
         { label: "Planned income received", value: money(m.plannedIncome), tone: "in" },
         ...(m.otherIncome > 0 ? [{ label: "Other money in", value: money(m.otherIncome), tone: "in" }] : []),
         ...(m.awaited > 0 ? [{ label: "Planned income still to arrive", value: money(m.awaited) }] : []),
-        { label: "Bought straight from the bank", value: "\u2212" + money(m.spent - m.cardOut), tone: "out" },
-        { label: "Paid to your cards", value: "\u2212" + money(m.cardPaid), tone: "out" },
+        { label: "Bought straight from the bank", value: "−" + money(m.spent - m.cardOut), tone: "out" },
+        { label: "Paid to your cards", value: "−" + money(m.cardPaid), tone: "out" },
         { label: "Cash still in the bank", value: money(m.cashLeft), total: true },
         ...(m.planning ? [
           { label: "Your budget for the cycle", value: money(m.budget) },
-          { label: "Spent against it", value: "\u2212" + money(m.budgetedSpent), tone: "out" },
+          { label: "Spent against it", value: "−" + money(m.budgetedSpent), tone: "out" },
           { label: "Budget still unspent", value: money(m.planLeft), total: true },
         ] : []),
       ],
       note: <>The headline shows whichever is smaller, so it never promises money that hasn't
-        arrived \u2014 right now <b className="num">{money(m.left)}</b>. The daily figure divides
+        arrived — right now <b className="num">{money(m.left)}</b>. The daily figure divides
         that same number, not the budget.</>,
     },
     bank: {
       title: "In the bank",
       rows: [
         { label: "Money received this cycle", value: money(m.income), tone: "in" },
-        { label: "Bought straight from the bank", value: "\u2212" + money(m.spent - m.cardOut), tone: "out" },
-        { label: "Paid to your cards", value: "\u2212" + money(m.cardPaid), tone: "out" },
-        { label: "Cash position", value: (m.cashLeft < 0 ? "\u2212" : "") + money(Math.abs(m.cashLeft)), total: true },
+        { label: "Bought straight from the bank", value: "−" + money(m.spent - m.cardOut), tone: "out" },
+        { label: "Paid to your cards", value: "−" + money(m.cardPaid), tone: "out" },
+        { label: "Cash position", value: (m.cashLeft < 0 ? "−" : "") + money(Math.abs(m.cashLeft)), total: true },
       ],
       note: "Card purchases aren't here — they didn't leave your account. Only the repayments did.",
     },
@@ -1485,7 +1563,7 @@ function Home(props) {
       title: "Owed on cards",
       rows: [
         { label: "Everything ever charged to a card", value: money(m.cardBalance + m.cardPaidAll), tone: "out" },
-        { label: "Everything ever repaid", value: "\u2212" + money(m.cardPaidAll), tone: "in" },
+        { label: "Everything ever repaid", value: "−" + money(m.cardPaidAll), tone: "in" },
         { label: "Still owed", value: money(m.cardBalance), total: true },
         { label: "Of which added this cycle", value: money(m.cardOut) },
         { label: "Paid off this cycle", value: money(m.cardPaid), tone: "in" },
@@ -1511,8 +1589,8 @@ function Home(props) {
       title: "The ring",
       rows: [
         { label: `Day ${m.dayIndex} of ${m.dayIndex + m.daysLeft - 1}`, value: `${m.daysLeft} left` },
-        { label: "Outer arc \u2014 how much of the cycle has passed", value: `${Math.round(m.through * 100)}%` },
-        { label: "Inner arc \u2014 how much of the budget is gone",
+        { label: "Outer arc — how much of the cycle has passed", value: `${Math.round(m.through * 100)}%` },
+        { label: "Inner arc — how much of the budget is gone",
           value: `${m.budget > 0 ? Math.round((m.budgetedSpent / m.budget) * 100) : 0}%`,
           tone: m.budget > 0 && m.budgetedSpent / m.budget > m.through ? "out" : "in" },
       ],
@@ -1690,7 +1768,7 @@ function Home(props) {
               <div className="scrubLine" style={{ left: `${((scrub + 0.5) / spark.length) * 100}%` }} />
               <div className="scrubBubble" style={{
                 left: `${Math.min(88, Math.max(12, ((scrub + 0.5) / spark.length) * 100))}%` }}>
-                <b className="num">{spark[scrub].future ? "\u2014" : money(spark[scrub].amount)}</b>
+                <b className="num">{spark[scrub].future ? "—" : money(spark[scrub].amount)}</b>
                 <span>{fmtDay(spark[scrub].iso)}</span>
               </div>
             </>
@@ -1724,11 +1802,11 @@ function Home(props) {
           <span className="eyebrow">In the bank</span>
           <span className={`num ${m.cashLeft < 0 ? "over" : ""}`}
             style={{ fontSize: 22, fontWeight: 600, marginTop: 5 }}>
-            {m.cashLeft < 0 ? "\u2212" : ""}{money(Math.abs(m.cashLeft))}
+            {m.cashLeft < 0 ? "−" : ""}{money(Math.abs(m.cashLeft))}
           </span>
           {/* "out" hid repayments inside it, which is how money seemed to vanish. */}
           <span style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
-            {money(m.income)} in \u00b7 {money(m.spent - m.cardOut)} spent
+            {money(m.income)} in · {money(m.spent - m.cardOut)} spent
             {m.cardPaid > 0 && <> · {money(m.cardPaid)} to cards</>}
           </span>
         </button>
@@ -1776,11 +1854,11 @@ function Home(props) {
                   await saveTx([{
                     id: `${Date.now()}-p${paid + 1}`, kind: "cardpay", amount: amt,
                     categoryId: "__cardpay",
-                    note: `${t.plan.note} \u2014 payment ${paid + 1} of ${t.plan.total}`,
+                    note: `${t.plan.note} — payment ${paid + 1} of ${t.plan.total}`,
                     date: today, src: "bank", cardId: t.plan.cardId, planId: t.plan.id,
                   }, ...tx]);
                   setToast({ prevTx: prev, prevConfig: config,
-                    filed: { icon: "pay", text: `Card repayment \u00b7 ${money(amt)}` } });
+                    filed: { icon: "pay", text: `Card repayment · ${money(amt)}` } });
                   dismissToast();
                 }}>I've paid this</button>
               </div>
@@ -1907,7 +1985,7 @@ function Home(props) {
               </button>
               <input value={text} onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
-                placeholder="45 groceries, salary came in\u2026"
+                placeholder="45 groceries, salary came in…"
                 aria-label="Tell your wallet what happened" />
               <button className="send" onClick={send} disabled={!text.trim()} aria-label="Send">
                 <Send size={17} />
@@ -1962,7 +2040,7 @@ function Home(props) {
               )}
 
               <Tip label="How to log something" title="Logging an entry">
-                Type it the way you'd say it \u2014 \u201c45 groceries\u201d. Pick the type above,
+                Type it the way you'd say it — “45 groceries”. Pick the type above,
                 and which card if you used one. Works in English or Arabic.
                 {!aiOn && " Add an API key in Plan for advice."}
               </Tip>
@@ -2033,7 +2111,7 @@ function Home(props) {
                       {r.note}
                       <span style={{ color: "var(--muted)", fontSize: 11, marginLeft: 6 }}>
                         {r.kind === "income" ? "Money in" : cat ? cat.name : "Other"}
-                        {card ? ` \u00b7 ${card.name}` : ""}
+                        {card ? ` · ${card.name}` : ""}
                       </span>
                     </span>
                     <span className="num" style={{ fontSize: 13.5, fontWeight: 600 }}>
@@ -2345,7 +2423,7 @@ function Cards({ config, saveConfig, tx, saveTx, m }) {
         <div style={{ padding: "14px 15px" }}>
           <div className="eyebrow" style={{ marginBottom: 8 }}>Add a card</div>
           <div className="field">
-            <input className="input wide" placeholder="ADIB, Tabby, Tamara\u2026"
+            <input className="input wide" placeholder="ADIB, Tabby, Tamara…"
               value={draftName} onChange={(e) => setDraftName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addCard()}
               aria-label="New card name" />
@@ -2376,7 +2454,7 @@ function History({ tx, config, saveTx, learn }) {
     <>
       <div className="eyebrow" style={{ marginBottom: 6 }}>Everything you've logged</div>
       <div className="empty" style={{ padding: "0 0 6px" }}>
-        Tap any entry to fix the note, amount, date, category \u2014 or what it is.
+        Tap any entry to fix the note, amount, date, category — or what it is.
       </div>
 
       {!groups.length && (
@@ -2442,7 +2520,7 @@ function History({ tx, config, saveTx, learn }) {
                   <span className="num" style={{ fontSize: 15, fontWeight: 500,
                     color: t.kind === "income" ? "var(--gold)"
                       : t.kind === "cardpay" ? "var(--leaf)" : undefined }}>
-                    {t.kind === "income" ? "+" : t.kind === "cardpay" ? "\u21a9 " : ""}{money(t.amount)}
+                    {t.kind === "income" ? "+" : t.kind === "cardpay" ? "↩ " : ""}{money(t.amount)}
                   </span>
                   <Pencil size={13} style={{ color: "var(--muted)", flex: "none" }} />
                 </button>
@@ -2599,16 +2677,24 @@ function EditSheet({ tx, config, onClose, onSave, onDelete, learn }) {
 
 /* ---------- plan ---------- */
 
-function Fold({ title, hint, defaultOpen, children }) {
+function Fold({ title, hint, defaultOpen, tip, children }) {
   const [open, setOpen] = useState(!!defaultOpen);
   return (
     <div className="panel" data-open={open ? "1" : "0"}
       style={{ borderColor: open ? "var(--gold)" : "var(--line)" }}>
-      <button className="panelHead" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span className="eyebrow" style={{ flex: 1 }}>{title}</span>
-        <ChevronDown size={15} style={{ color: "var(--muted)", flex: "none",
-          transform: open ? "rotate(180deg)" : "none", transition: "transform .18s" }} />
-      </button>
+      {/* The header carries its own help mark, so a tip never costs a line of
+          its own. Sitting alone in the body they read as stray characters. */}
+      <div className="panelHead" style={{ cursor: "default" }}>
+        <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
+          style={{ flex: 1, display: "flex", alignItems: "center", gap: 8,
+            background: "none", border: "none", padding: 0, cursor: "pointer",
+            color: "inherit", font: "inherit", textAlign: "left" }}>
+          <span className="eyebrow" style={{ flex: 1 }}>{title}</span>
+          <ChevronDown size={15} style={{ color: "var(--muted)", flex: "none",
+            transform: open ? "rotate(180deg)" : "none", transition: "transform .18s" }} />
+        </button>
+        {tip}
+      </div>
       {hint && !open && <div className="empty" style={{ padding: "0 15px 13px" }}>{hint}</div>}
       {open && <div className="panelBody">{children}</div>}
     </div>
@@ -2652,7 +2738,7 @@ function Setup(props) {
       <div className="eyebrow" style={{ marginBottom: 6 }}>Plan</div>
       <div className="empty" style={{ padding: "0 0 10px", fontSize: 13 }}>
         <span style={{ color: "var(--gold)" }}>●</span> v{__APP_VERSION__} · works offline
-        \u00b7 {tx.length} entries
+        · {tx.length} entries
       </div>
 
       <div style={{ fontSize: 21, fontWeight: 600, margin: "2px 0 14px" }}>
@@ -2774,13 +2860,13 @@ function Setup(props) {
         })()}
 
         <Fold title="Income" defaultOpen
-          hint={expected > 0 ? `${DH} ${money(expected)} expected each cycle` : "Nothing set up yet"}>
-          <div style={{ paddingBottom: 10 }}>
+          hint={expected > 0 ? `${DH} ${money(expected)} expected each cycle` : "Nothing set up yet"}
+          tip={
             <Tip label="What income is for" title="Income">
-              What you expect to come in each cycle. Only used to check your budgets \u2014
+              What you expect to come in each cycle. Only used to check your budgets —
               nothing counts until you log it arriving.
             </Tip>
-          </div>
+          }>
 
           {(config.incomes || []).length > 0 && (
             <div style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "0 0 4px 20px",
@@ -2833,7 +2919,7 @@ function Setup(props) {
           )}
         </Fold>
 
-        <Fold title="Not sure what to put here?" hint="Budgets are optional \u2014 here's how to start">
+        <Fold title="Not sure what to put here?" hint="Budgets are optional — here's how to start">
           <div className="empty" style={{ padding: "0 0 10px" }}>
             You don't have to budget by category. Without any budgets the app tracks
             what you spend against what you earn, which is enough for most people.
@@ -2843,14 +2929,14 @@ function Setup(props) {
           </div>
         </Fold>
 
-        <Fold title="Budgets" defaultOpen hint={total > 0 ? `${DH} ${money(total)} allocated` : "None set \u2014 tracking against income"}>
-          <div style={{ paddingBottom: 10 }}>
+        <Fold title="Budgets" defaultOpen hint={total > 0 ? `${DH} ${money(total)} allocated` : "None set — tracking against income"}
+          tip={
             <Tip label="What budgets are" title="Budgets">
               What you plan to spend per category each cycle. Targets, not money in hand.
-              Leave one at 0 and it simply isn't budgeted \u2014 spending there won't count
+              Leave one at 0 and it simply isn't budgeted — spending there won't count
               against anything.
             </Tip>
-          </div>
+          }>
           {config.categories.map((c) => (
             <div key={c.id} className="field" style={{ borderBottom: "1px solid var(--line)" }}>
               <span className="dot" style={{ background: c.color }} />
@@ -2901,10 +2987,10 @@ function Setup(props) {
           </div>
         </Fold>
 
-        <Fold title="AI" hint={getDeviceKey() ? `On \u00b7 ${getProvider() || "openai"}` : "Off \u2014 using the offline matcher"}>
+        <Fold title="AI" hint={getDeviceKey() ? `On · ${getProvider() || "openai"}` : "Off — using the offline matcher"}>
           <div className="empty" style={{ padding: "0 0 12px" }}>
             Your key stays on this phone and is sent straight to the provider you pick.
-            Without one the app still works \u2014 it matches on words instead.
+            Without one the app still works — it matches on words instead.
           </div>
 
           <div className="field">
@@ -2931,7 +3017,7 @@ function Setup(props) {
           <div className="field">
             <label>API key</label>
             <input className="input wide" type="password" value={keyDraft}
-              placeholder={getDeviceKey() ? "\u2022\u2022\u2022\u2022 saved" : "sk-\u2026"}
+              placeholder={getDeviceKey() ? "•••• saved" : "sk-…"}
               onChange={(e) => setKeyDraft(e.target.value)} aria-label="API key" />
           </div>
 
@@ -2950,7 +3036,7 @@ function Setup(props) {
           {keyMsg && <div className="empty" style={{ padding: "10px 0 0", color: "var(--leaf)" }}>{keyMsg}</div>}
         </Fold>
 
-        <Fold title="Backup" defaultOpen hint="Export regularly \u2014 it's the only copy you control">
+        <Fold title="Backup" defaultOpen hint="Export regularly — it's the only copy you control">
           <div className="empty" style={{ padding: "0 0 12px" }}>
             {tx.length} entries on this phone. Importing replaces everything, so export
             first if you're unsure.
@@ -2973,7 +3059,7 @@ function Setup(props) {
                       await saveTx(data.tx);
                       setImportMsg(`Restored ${data.tx.length} entries.`);
                     } catch (err) {
-                      setImportMsg(`Couldn't read that file \u2014 ${err.message}`);
+                      setImportMsg(`Couldn't read that file — ${err.message}`);
                     }
                   };
                   r.readAsText(f);
@@ -3005,7 +3091,7 @@ function Setup(props) {
             ))}
           </div>
           <div className="empty" style={{ padding: "10px 2px 0", fontSize: 12 }}>
-            {CHANGELOG.length} releases \u00b7 scroll for older
+            {CHANGELOG.length} releases · scroll for older
           </div>
         </Fold>
 
@@ -3031,7 +3117,7 @@ function Setup(props) {
       </>}
 
       <div className="empty" style={{ padding: "20px 2px 0", fontSize: 11.5, textAlign: "center" }}>
-        Wallet v{__APP_VERSION__} \u00b7 in development
+        Wallet v{__APP_VERSION__} · in development
       </div>
     </>
   );
@@ -3147,7 +3233,7 @@ function UpdateBanner() {
                 else window.location.reload();
               }).catch(() => window.location.reload());
             }}>
-            {busy ? "Updating\u2026" : "Update now"}
+            {busy ? "Updating…" : "Update now"}
           </button>
           <button className="btn" style={{ flex: 1 }} onClick={() => setDismissed(true)}>Later</button>
         </div>
@@ -3234,7 +3320,7 @@ export default function SpendingWallet() {
      rather than relying on a list someone else guessed at. */
   const learn = (note, catId) => {
     const words = String(note || "").toLowerCase()
-      .replace(/[^a-z\u0600-\u06ff\s]/g, " ").split(/\s+/)
+      .replace(/[^a-z؀-ۿ\s]/g, " ").split(/\s+/)
       .filter((w) => w.length > 3);
     if (!words.length || !catId) return;
     const learned = { ...(config.learned || {}) };
@@ -3279,7 +3365,7 @@ export default function SpendingWallet() {
   }, [config.categories, m]);
 
   const cycleLabel = cycleOffset === 0 ? "This cycle"
-    : `${fmtDay(cycle.start)} \u2013 ${fmtDay(cycle.end)}`;
+    : `${fmtDay(cycle.start)} – ${fmtDay(cycle.end)}`;
 
   /* The panes ride with your finger rather than animating after it. */
   const trackRef = useRef(null);
