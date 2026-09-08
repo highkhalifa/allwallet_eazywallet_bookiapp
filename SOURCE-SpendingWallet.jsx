@@ -86,6 +86,14 @@ function Dh({ size = "1em", style }) {
 
 /* ---------- dates ---------- */
 
+/* Whole months between two dates, used to work out which slice of an
+   instalment plan a given cycle is paying. */
+function monthsBetween(fromISO, toISO) {
+  const [fy, fm] = fromISO.split("-").map(Number);
+  const [ty, tm] = toISO.split("-").map(Number);
+  return (ty - fy) * 12 + (tm - fm);
+}
+
 const pad = (n) => String(n).padStart(2, "0");
 const todayISO = () => {
   const d = new Date();
@@ -295,7 +303,22 @@ export function computeMetrics({ tx, config, cycle, today, past, future }) {
   let income = 0, plannedIncome = 0, otherIncome = 0;
   let cashOut = 0, cardOut = 0, cardPaid = 0, spent = 0, spentToday = 0;
 
-  for (const t of inCycle) {
+  /* An instalment purchase is committed all at once but paid over months. If
+     the whole amount lands in the month you bought it, spending can exceed
+     income by more than you actually parted with. So the category is charged
+     one slice per cycle, for as many cycles as the plan runs. */
+  const sliceOf = (t) => {
+    if (!t.plan || !t.plan.total || t.plan.total < 2) return null;
+    const n = monthsBetween(t.date, cycle.start);
+    if (n < 0 || n >= t.plan.total) return 0;          // outside the plan's life
+    return n === 0 ? t.plan.first : t.plan.slice;
+  };
+
+  // purchases from earlier cycles that are still being paid off
+  const carried = tx.filter((t) =>
+    t.kind === "expense" && t.plan && t.date < cycle.start && (sliceOf(t) || 0) > 0);
+
+  for (const t of [...inCycle, ...carried]) {
     if (t.kind === "income") {
       income += t.amount;
       /* Only money from a source you planned for counts towards the plan.
@@ -312,11 +335,17 @@ export function computeMetrics({ tx, config, cycle, today, past, future }) {
     }
     if (t.kind === "cardpay") { cardPaid += t.amount; cashOut += t.amount; continue; }
 
-    spent += t.amount;
-    byCat[t.categoryId] = (byCat[t.categoryId] || 0) + t.amount;
-    if (t.src === "card") cardOut += t.amount;
-    else cashOut += t.amount;
-    if (t.date === today) spentToday += t.amount;
+    // a planned purchase contributes only this cycle's slice
+    const slice = sliceOf(t);
+    const charge = slice === null ? t.amount : slice;
+    if (charge <= 0) continue;
+
+    spent += charge;
+    byCat[t.categoryId] = (byCat[t.categoryId] || 0) + charge;
+    // cardOut is what was added to the card, which does happen in full, once
+    if (t.src === "card" && t.date >= cycle.start && t.date <= cycle.end) cardOut += t.amount;
+    else if (t.src !== "card") cashOut += charge;
+    if (t.date === today && slice === null) spentToday += t.amount;
   }
 
   const budget = config.categories.reduce((s, c) => s + Number(c.budget || 0), 0);
@@ -397,6 +426,19 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.40.1", items: [
+    "The daily bars now show the instalment slice too \u2014 they were still spiking with the full purchase while the totals showed the monthly share",
+    "A payment carried from an earlier cycle appears on the day it falls due",
+  ]},
+  { v: "0.40.0", items: [
+    "Instalment purchases are charged one payment per cycle instead of all at once \u2014 a 6,000 fee split over 3 months no longer shows as 6,000 spent in one month",
+    "The row shows this month's share, with the full price beside it",
+    "The card balance still shows the whole amount owed from day one, because it is",
+  ]},
+  { v: "0.39.4", items: [
+    "Transactions inside a category can be tapped to edit, the same as in History",
+    "When your budget is tighter than your cash, the hero now says so \u2014 the two figures differed with no explanation",
+  ]},
   { v: "0.39.3", items: [
     "Fixed the page scrolling while dragging an entry \u2014 the drag now holds the gesture properly",
     "Moving your finger before the hold completes scrolls as normal, so nothing is picked up by accident",
@@ -686,6 +728,10 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
 /* cash and card read differently at a glance, not just by an icon */
 .rowDrag{touch-action:pan-y;}
 .rowDrag.held{touch-action:none;}
+
+.planTag{display:inline-block;margin-left:7px;font-size:10px;color:var(--amber);
+  border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);
+  border-radius:99px;padding:1px 6px;}
 
 .payTag{flex:none;font-size:9.5px;font-weight:700;letter-spacing:.06em;
   text-transform:uppercase;border-radius:99px;padding:2px 7px;line-height:1.5;}
@@ -984,6 +1030,7 @@ function Home(props) {
   const [hushed, setHushed] = useState([]);
   const [srcFilter, setSrcFilter] = useState("all");
   const [openCat, setOpenCat] = useState("");
+  const [editTx, setEditTx] = useState(null);
   const [drag, setDrag] = useState(null);
 
   /* Hold an entry and drag it onto another category. The ghost follows the
@@ -1095,17 +1142,45 @@ function Home(props) {
     }
   }, [config.cards, kind, setKind]);
 
+  /* The bars must agree with the totals: an instalment purchase shows this
+     cycle's slice, not the full price, or a 6,000 fee spikes one day while the
+     category says 2,000. A slice carried in from an earlier cycle is drawn on
+     the day it falls due, not on the original purchase date. */
+  /* What this purchase costs THIS cycle: a slice if it's on a plan, the whole
+     thing otherwise. The row shows the slice, with the full price beside it. */
+  const chargeFor = (t) => {
+    if (!t.plan || t.plan.total < 2) return t.amount;
+    const n = monthsBetween(t.date, cycle.start);
+    if (n < 0 || n >= t.plan.total) return 0;
+    return n === 0 ? t.plan.first : t.plan.slice;
+  };
   const spark = useMemo(() => {
     const out = [];
     for (let i = 0; i < cycle.days; i++) {
       const iso = addDays(cycle.start, i);
-      const amount = m.inCycle
-        .filter((t) => t.date === iso && t.kind === "expense")
-        .reduce((s, t) => s + t.amount, 0);
+      let amount = 0;
+
+      for (const t of m.inCycle) {
+        if (t.kind !== "expense" || t.date !== iso) continue;
+        amount += chargeFor(t);
+      }
+
+      // earlier purchases still being paid land on the matching day of this cycle
+      for (const t of tx) {
+        if (t.kind !== "expense" || !t.plan || t.date >= cycle.start) continue;
+        const due = chargeFor(t);
+        if (due <= 0) continue;
+        const dueDay = Math.min(Number(t.date.slice(8, 10)), cycle.days);
+        if (addDays(cycle.start, Math.max(0, dueDay - Number(cycle.start.slice(8, 10)))) === iso
+            || (i === 0 && dueDay < Number(cycle.start.slice(8, 10)))) {
+          amount += due;
+        }
+      }
+
       out.push({ iso, amount, isToday: iso === today, future: iso > today });
     }
     return out;
-  }, [m.inCycle, cycle, today]);
+  }, [m.inCycle, tx, cycle, today]);
 
   const pace = m.budget > 0 ? m.budget / cycle.days : (m.income > 0 ? m.income / cycle.days : 0);
   const sparkMax = Math.max(pace * 1.6, ...spark.map((s) => s.amount), 1);
@@ -1258,6 +1333,8 @@ function Home(props) {
 
   const cats = config.categories;
   const filtered = (t) => srcFilter === "all" || (t.src || "bank") === srcFilter;
+
+
   const shownSpent = srcFilter === "all" ? m.spent
     : srcFilter === "card" ? m.cardOut : m.spent - m.cardOut;
 
@@ -1283,6 +1360,19 @@ function Home(props) {
           </div>
         </>,
         document.body
+      )}
+
+      {editTx && (
+        <EditSheet tx={editTx} config={config} learn={learn}
+          onClose={() => setEditTx(null)}
+          onSave={async (next) => {
+            await saveTx(tx.map((t) => (t.id === next.id ? next : t)));
+            setEditTx(null);
+          }}
+          onDelete={async () => {
+            await saveTx(tx.filter((t) => t.id !== editTx.id));
+            setEditTx(null);
+          }} />
       )}
 
       <Maths open={!!maths} onClose={() => setMaths(null)}
@@ -1363,6 +1453,15 @@ function Home(props) {
             ? <><b className="num">{money(m.perDay)}</b> a day for the {m.daysLeft} {m.daysLeft === 1 ? "day" : "days"} left</>
             : <>You're <b className="num">{money(-m.left)}</b> past the plan with {m.daysLeft} {m.daysLeft === 1 ? "day" : "days"} to go</>}
         </div>
+        {/* The hero shows the smaller of budget-left and cash-left. When they
+            differ that looks like a contradiction unless we say which one bit. */}
+        {m.planning && Math.abs(m.left - m.cashLeft) > 1 && m.left >= 0 && (
+          <div className="sub" style={{ marginTop: 2 }}>
+            Your budget is the limit here — there's <b className="num">{money(m.cashLeft)}</b> in
+            the bank, but only <b className="num">{money(m.planLeft)}</b> of budget left.
+          </div>
+        )}
+
         <div className="sub" style={{ marginTop: 2 }}>
           {m.income <= 0 ? <>No income logged this cycle yet. Log it when it lands.</>
             : m.awaited > 0 ? <><b className="num">{money(m.awaited)}</b> of your plan hasn't arrived yet</>
@@ -1696,6 +1795,9 @@ function Home(props) {
               Tap a category to see what's in it. Hold an entry and drag it onto another
               category to move it — and the app remembers, so the next one lands there
               by itself.
+              <br /><br />
+              A purchase split into instalments is charged one payment per cycle, not all
+              at once. The row shows this month's share, with the full price beside it.
             </Tip>
           </div>
         </div>
@@ -1720,8 +1822,10 @@ function Home(props) {
             const budget = Number(c.budget) || 0;
             const over = budget > 0 && spent > budget;
             const open = openCat === c.id;
-            const items = m.inCycle
-              .filter((t) => t.kind === "expense" && t.categoryId === c.id && filtered(t))
+            const carried = tx.filter((t) => t.kind === "expense" && t.plan
+              && t.date < cycle.start && t.categoryId === c.id && chargeFor(t) > 0 && filtered(t));
+            const items = [...m.inCycle
+              .filter((t) => t.kind === "expense" && t.categoryId === c.id && filtered(t)), ...carried]
               .sort((a, b) => b.date.localeCompare(a.date));
             const isTarget = drag && drag.overCat === c.id && drag.tx.categoryId !== c.id;
 
@@ -1766,8 +1870,9 @@ function Home(props) {
                           Nothing logged here this cycle.
                         </div>
                       : items.map((t) => (
-                          <div key={t.id} data-owns-drag
+                          <div key={t.id} data-owns-drag role="button" tabIndex={0}
                             className={`rowDrag ${drag && drag.tx.id === t.id ? "held" : ""}`}
+                            onClick={() => { if (!drag) setEditTx(t); }}
                             onTouchStart={(e) => startDrag(t, e)}
                             onTouchMove={(e) => {
                               if (drag) { moveDrag(e); return; }
@@ -1781,6 +1886,7 @@ function Home(props) {
                             onTouchEnd={endDrag} onTouchCancel={endDrag}
                             style={{ display: "flex", alignItems: "center", gap: 9,
                               padding: "9px 0", borderTop: "1px solid var(--line)", fontSize: 13,
+                              cursor: "pointer",
                               opacity: drag && drag.tx.id === t.id ? .3 : 1 }}>
                             <GripVertical size={13} style={{ color: "var(--muted)", flex: "none" }} />
                             <span style={{ color: "var(--muted)", flex: "none", width: 46 }}>{fmtDay(t.date)}</span>
@@ -1788,8 +1894,16 @@ function Home(props) {
                               {t.src === "card" ? "card" : "cash"}
                             </span>
                             <span style={{ flex: 1, minWidth: 0, overflow: "hidden",
-                              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.note}</span>
-                            <span className="num">{money(t.amount)}</span>
+                              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {t.note}
+                              {t.plan && t.plan.total > 1 && (
+                                <span className="planTag">
+                                  {money(t.amount)} over {t.plan.total}
+                                </span>
+                              )}
+                            </span>
+                            <span className="num">{money(chargeFor(t))}</span>
+                            <Pencil size={12} style={{ color: "var(--muted)", flex: "none" }} />
                           </div>
                         ))}
                   </div>
