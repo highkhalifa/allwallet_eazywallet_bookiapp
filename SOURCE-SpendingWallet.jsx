@@ -397,6 +397,11 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.39.3", items: [
+    "Fixed the page scrolling while dragging an entry \u2014 the drag now holds the gesture properly",
+    "Moving your finger before the hold completes scrolls as normal, so nothing is picked up by accident",
+    "A short buzz when an entry lifts, so you know it's in hand",
+  ]},
   { v: "0.39.2", items: [
     "Drag and drop is back: hold an entry inside a category and drag it onto another",
     "Moving one teaches the app that word, so the next lands there by itself",
@@ -679,6 +684,9 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
 .themeDial:active{transform:scale(.92);color:var(--gold);}
 
 /* cash and card read differently at a glance, not just by an icon */
+.rowDrag{touch-action:pan-y;}
+.rowDrag.held{touch-action:none;}
+
 .payTag{flex:none;font-size:9.5px;font-weight:700;letter-spacing:.06em;
   text-transform:uppercase;border-radius:99px;padding:2px 7px;line-height:1.5;}
 .payTag[data-src="card"]{color:var(--amber);
@@ -982,13 +990,31 @@ function Home(props) {
      finger in screen coordinates, so it must be portalled out of the swipe
      track — a transformed ancestor makes position:fixed relative to itself. */
   const dragTimer = useRef(0);
+  const dragRef = useRef(null);
+
+  /* React attaches touch listeners passively, so preventDefault inside
+     onTouchMove is ignored and the page scrolls anyway. A non-passive listener
+     added by hand is the only way to hold the gesture. */
+  useEffect(() => {
+    const stop = (e) => { if (dragRef.current) e.preventDefault(); };
+    document.addEventListener("touchmove", stop, { passive: false });
+    return () => document.removeEventListener("touchmove", stop);
+  }, []);
+
+  const holdFrom = useRef({ x: 0, y: 0 });
   const startDrag = (t, e) => {
     const x = e.touches ? e.touches[0].clientX : e.clientX;
     const y = e.touches ? e.touches[0].clientY : e.clientY;
-    dragTimer.current = setTimeout(() => setDrag({ tx: t, x, y, overCat: "" }), 320);
+    holdFrom.current = { x, y };
+    dragTimer.current = setTimeout(() => {
+      dragRef.current = true;          // the listener above reads this synchronously
+      if (navigator.vibrate) navigator.vibrate(12);
+      setDrag({ tx: t, x, y, overCat: "" });
+    }, 320);
   };
   const moveDrag = (e) => {
     if (!drag) return;
+    if (e.cancelable) e.preventDefault();
     const x = e.touches ? e.touches[0].clientX : e.clientX;
     const y = e.touches ? e.touches[0].clientY : e.clientY;
     const el = document.elementFromPoint(x, y);
@@ -997,6 +1023,7 @@ function Home(props) {
   };
   const endDrag = async () => {
     clearTimeout(dragTimer.current);
+    dragRef.current = null;
     if (!drag) return;
     const { tx: moved, overCat } = drag;
     setDrag(null);
@@ -1740,8 +1767,17 @@ function Home(props) {
                         </div>
                       : items.map((t) => (
                           <div key={t.id} data-owns-drag
+                            className={`rowDrag ${drag && drag.tx.id === t.id ? "held" : ""}`}
                             onTouchStart={(e) => startDrag(t, e)}
-                            onTouchMove={(e) => { if (drag) { e.preventDefault(); moveDrag(e); } else clearTimeout(dragTimer.current); }}
+                            onTouchMove={(e) => {
+                              if (drag) { moveDrag(e); return; }
+                              /* Moving before the hold completes means you meant
+                                 to scroll, so let go of the pickup. */
+                              const p = e.touches[0];
+                              const d = Math.abs(p.clientX - holdFrom.current.x)
+                                + Math.abs(p.clientY - holdFrom.current.y);
+                              if (d > 10) clearTimeout(dragTimer.current);
+                            }}
                             onTouchEnd={endDrag} onTouchCancel={endDrag}
                             style={{ display: "flex", alignItems: "center", gap: 9,
                               padding: "9px 0", borderTop: "1px solid var(--line)", fontSize: 13,
