@@ -397,6 +397,11 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.39.2", items: [
+    "Drag and drop is back: hold an entry inside a category and drag it onto another",
+    "Moving one teaches the app that word, so the next lands there by itself",
+    "Cash and card are colour-tagged \u2014 green for cash, amber for card \u2014 in categories and history",
+  ]},
   { v: "0.39.1", items: [
     "Fixed the rebuild reading the wrong storage keys \u2014 existing data appeared missing but was never touched",
     "AI settings are back, and the model is editable for every provider",
@@ -672,6 +677,16 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
   justify-content:center;background:var(--card);color:var(--muted);border:1px solid var(--line);
   cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.18);transition:transform .12s;}
 .themeDial:active{transform:scale(.92);color:var(--gold);}
+
+/* cash and card read differently at a glance, not just by an icon */
+.payTag{flex:none;font-size:9.5px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;border-radius:99px;padding:2px 7px;line-height:1.5;}
+.payTag[data-src="card"]{color:var(--amber);
+  background:color-mix(in srgb,var(--amber) 14%,transparent);
+  border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);}
+.payTag[data-src="bank"]{color:var(--leaf);
+  background:color-mix(in srgb,var(--leaf) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--leaf) 35%,transparent);}
 
 .spin{animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
@@ -961,6 +976,41 @@ function Home(props) {
   const [hushed, setHushed] = useState([]);
   const [srcFilter, setSrcFilter] = useState("all");
   const [openCat, setOpenCat] = useState("");
+  const [drag, setDrag] = useState(null);
+
+  /* Hold an entry and drag it onto another category. The ghost follows the
+     finger in screen coordinates, so it must be portalled out of the swipe
+     track — a transformed ancestor makes position:fixed relative to itself. */
+  const dragTimer = useRef(0);
+  const startDrag = (t, e) => {
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    const y = e.touches ? e.touches[0].clientY : e.clientY;
+    dragTimer.current = setTimeout(() => setDrag({ tx: t, x, y, overCat: "" }), 320);
+  };
+  const moveDrag = (e) => {
+    if (!drag) return;
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    const y = e.touches ? e.touches[0].clientY : e.clientY;
+    const el = document.elementFromPoint(x, y);
+    const holder = el && el.closest ? el.closest("[data-cat]") : null;
+    setDrag((d) => (d ? { ...d, x, y, overCat: holder ? holder.dataset.cat : "" } : d));
+  };
+  const endDrag = async () => {
+    clearTimeout(dragTimer.current);
+    if (!drag) return;
+    const { tx: moved, overCat } = drag;
+    setDrag(null);
+    if (!overCat || overCat === moved.categoryId) return;
+    /* Moving it also teaches the word, so the next one lands here by itself. */
+    learn(moved.note, overCat);
+    const prev = tx;
+    await saveTx(tx.map((t) => (t.id === moved.id ? { ...t, categoryId: overCat } : t)));
+    const cat = config.categories.find((c) => c.id === overCat);
+    setToast({ prevTx: prev, prevConfig: config,
+      filed: { icon: "out", text: `Moved to ${cat ? cat.name : "another category"}`,
+        color: cat ? cat.color : undefined } });
+    dismissToast();
+  };
   const [thinking, setThinking] = useState(0);
   const [err, setErr] = useState("");
   const [settled, setSettled] = useState("");
@@ -1186,6 +1236,28 @@ function Home(props) {
 
   return (
     <>
+      {drag && createPortal(
+        <>
+          <div style={{ position: "fixed", left: drag.x, top: drag.y,
+            transform: "translate(-50%,-140%) rotate(-1.5deg) scale(1.04)",
+            pointerEvents: "none", zIndex: 90, background: "var(--card)",
+            border: "2px solid var(--gold)", borderRadius: 12, padding: "11px 15px",
+            display: "flex", alignItems: "baseline", gap: 12, maxWidth: 300, fontSize: 14,
+            boxShadow: "0 18px 40px rgba(0,0,0,.35)", color: "var(--sand)" }}>
+            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
+              whiteSpace: "nowrap" }}>{drag.tx.note}</span>
+            <span className="num" style={{ flex: "none", fontWeight: 600 }}>{money(drag.tx.amount)}</span>
+          </div>
+          <div style={{ position: "fixed", left: 0, right: 0, bottom: 92, textAlign: "center",
+            zIndex: 89, pointerEvents: "none" }}>
+            <span style={{ background: "var(--card)", border: "1px solid var(--gold)",
+              borderRadius: 99, padding: "8px 15px", fontSize: 13, color: "var(--sand)",
+              boxShadow: "0 8px 20px rgba(0,0,0,.2)" }}>Drop it on a category</span>
+          </div>
+        </>,
+        document.body
+      )}
+
       <Maths open={!!maths} onClose={() => setMaths(null)}
         title={maths ? MATHS[maths].title : ""}
         rows={maths ? MATHS[maths].rows : []}
@@ -1593,6 +1665,10 @@ function Home(props) {
               <br /><br />
               Card repayments aren't here: the purchase was counted when you made it, so
               counting the payment too would count it twice.
+              <br /><br />
+              Tap a category to see what's in it. Hold an entry and drag it onto another
+              category to move it — and the app remembers, so the next one lands there
+              by itself.
             </Tip>
           </div>
         </div>
@@ -1620,13 +1696,17 @@ function Home(props) {
             const items = m.inCycle
               .filter((t) => t.kind === "expense" && t.categoryId === c.id && filtered(t))
               .sort((a, b) => b.date.localeCompare(a.date));
+            const isTarget = drag && drag.overCat === c.id && drag.tx.categoryId !== c.id;
 
             return (
-              <div key={c.id} style={{
+              <div key={c.id} data-cat={c.id} style={{
                 padding: "15px 14px", marginBottom: 9, borderRadius: 14,
-                background: tint(c.color, open ? .12 : .06),
-                border: `1px solid ${tint(c.color, open ? .5 : .3)}`,
-                transition: "background .15s, border-color .15s",
+                background: isTarget ? "rgba(79,203,152,.20)" : tint(c.color, open ? .12 : .06),
+                border: `${isTarget ? 2 : 1}px solid ${isTarget ? "var(--gold)" : tint(c.color, open ? .5 : .3)}`,
+                transform: isTarget ? "scale(1.02)" : "none",
+                opacity: drag && !isTarget && drag.tx.categoryId !== c.id ? .55 : 1,
+                boxShadow: isTarget ? "0 6px 18px rgba(79,203,152,.28)" : "none",
+                transition: "background .15s, border-color .15s, transform .12s, opacity .15s",
               }}>
                 <button onClick={() => setOpenCat(open ? "" : c.id)}
                   style={{ display: "flex", alignItems: "center", gap: 11, width: "100%",
@@ -1659,10 +1739,18 @@ function Home(props) {
                           Nothing logged here this cycle.
                         </div>
                       : items.map((t) => (
-                          <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 9,
-                            padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 13 }}>
+                          <div key={t.id} data-owns-drag
+                            onTouchStart={(e) => startDrag(t, e)}
+                            onTouchMove={(e) => { if (drag) { e.preventDefault(); moveDrag(e); } else clearTimeout(dragTimer.current); }}
+                            onTouchEnd={endDrag} onTouchCancel={endDrag}
+                            style={{ display: "flex", alignItems: "center", gap: 9,
+                              padding: "9px 0", borderTop: "1px solid var(--line)", fontSize: 13,
+                              opacity: drag && drag.tx.id === t.id ? .3 : 1 }}>
+                            <GripVertical size={13} style={{ color: "var(--muted)", flex: "none" }} />
                             <span style={{ color: "var(--muted)", flex: "none", width: 46 }}>{fmtDay(t.date)}</span>
-                            {t.src === "card" && <CreditCard size={12} style={{ color: "var(--muted)", flex: "none" }} />}
+                            <span className="payTag" data-src={t.src === "card" ? "card" : "bank"}>
+                              {t.src === "card" ? "card" : "cash"}
+                            </span>
                             <span style={{ flex: 1, minWidth: 0, overflow: "hidden",
                               textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.note}</span>
                             <span className="num">{money(t.amount)}</span>
@@ -1855,8 +1943,11 @@ function History({ tx, config, saveTx, learn }) {
                     cursor: "pointer", color: "inherit", font: "inherit", textAlign: "left" }}>
                   <span className="dot" style={{ background: t.kind === "income" ? "var(--gold)"
                     : t.kind === "cardpay" ? "var(--leaf)" : catOf(t.categoryId).color }} />
-                  {t.src === "card" && t.kind === "expense" &&
-                    <CreditCard size={13} style={{ color: "var(--muted)", flex: "none" }} />}
+                  {t.kind === "expense" && (
+                    <span className="payTag" data-src={t.src === "card" ? "card" : "bank"}>
+                      {t.src === "card" ? "card" : "cash"}
+                    </span>
+                  )}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {t.kind === "cardpay" && <span className="repayTag">repayment</span>}

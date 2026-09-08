@@ -1,4 +1,4 @@
-const BUILD_VERSION = "0.39.1";
+const BUILD_VERSION = "0.39.2";
 const CACHE = "wallet-v80";
 
 /* Tell every open page which build just arrived.
