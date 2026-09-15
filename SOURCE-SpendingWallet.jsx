@@ -373,7 +373,11 @@ export function parseAlerts(raw, config, today) {
     }
     note = note.slice(0, 40);
 
-    const credited = /\b(credited|received|deposit|salary|refund|reversal|transfer from)\b/i.test(c);
+    /* Banks word an incoming payment a dozen ways. Missing one filed a salary
+       as spending, which is a big error to make silently. */
+    const credited =
+      /\b(credited|credit of|received|deposit(ed)?|salary|wages|payroll|refund(ed)?|reversal|reversed|cashback|transfer from|received from|inward|remittance|has been added|added to your)\b/i.test(c)
+      || /\b(\u062f\u0627\u0626\u0646|\u0631\u0627\u062a\u0628|\u0625\u064a\u062f\u0627\u0639|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u062d\u0648\u0627\u0644\u0629 \u0648\u0627\u0631\u062f\u0629)\b/.test(c);
     const isCard = /\b(credit card|card ending|card no|tabby|tamara|visa|mastercard)\b/i.test(c);
 
     let cardId = "";
@@ -914,6 +918,35 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
   border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);
   border-radius:99px;padding:1px 6px;}
 
+/* the pasted batch, sitting where the input was so it can't be missed */
+.reviewBox{animation:filedIn .24s ease-out;}
+.reviewHead{display:flex;align-items:center;gap:9px;padding:13px 12px 11px 15px;
+  border-bottom:1px solid var(--line);}
+.reviewList{max-height:340px;overflow-y:auto;overscroll-behavior:contain;}
+.reviewRow{display:flex;align-items:flex-start;gap:9px;padding:10px 12px 10px 13px;
+  border-bottom:1px solid var(--line);}
+.tickBox{width:19px;height:19px;border-radius:6px;display:flex;align-items:center;
+  justify-content:center;border:1.5px solid var(--line);color:var(--leather);}
+.tickBox[data-on="1"]{border-color:var(--leaf);background:var(--leaf);}
+
+.miniTag{flex:none;font-size:10px;font-weight:700;letter-spacing:.04em;cursor:pointer;
+  border-radius:99px;padding:3px 8px;line-height:1.5;font-family:inherit;
+  border:1px solid var(--line);background:var(--card2);color:var(--muted);}
+.miniTag[data-kind="income"]{color:var(--leaf);border-color:var(--leaf);
+  background:color-mix(in srgb,var(--leaf) 12%,transparent);}
+.miniTag[data-src="card"]{color:var(--amber);border-color:var(--amber);
+  background:color-mix(in srgb,var(--amber) 12%,transparent);}
+
+/* categories scroll sideways rather than wrapping into a wall of chips */
+.catScroll{display:flex;gap:5px;overflow-x:auto;flex:1;min-width:0;
+  padding-bottom:2px;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+.catScroll::-webkit-scrollbar{display:none;}
+.catPick{flex:none;font-size:10.5px;cursor:pointer;white-space:nowrap;font-family:inherit;
+  border-radius:99px;padding:3px 9px;border:1px solid var(--line);
+  background:var(--card2);color:var(--muted);}
+.catPick[data-on="1"]{border-color:var(--c);color:var(--c);
+  background:color-mix(in srgb,var(--c) 14%,transparent);font-weight:600;}
+
 .payTag{flex:none;font-size:9.5px;font-weight:700;letter-spacing:.06em;
   text-transform:uppercase;border-radius:99px;padding:2px 7px;line-height:1.5;}
 .payTag[data-src="card"]{color:var(--amber);
@@ -922,6 +955,28 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
 .payTag[data-src="bank"]{color:var(--leaf);
   background:color-mix(in srgb,var(--leaf) 12%,transparent);
   border:1px solid color-mix(in srgb,var(--leaf) 35%,transparent);}
+
+/* The ring assembles itself, one segment at a time.
+   Opacity only: transform and stroke-dasharray both define the shape in SVG,
+   and animating either is what made the donut vanish twice before. The arcs
+   keep their geometry as inline values that nothing touches. */
+@keyframes trackIn{from{opacity:0;}to{opacity:1;}}
+.ringWrap{animation:trackIn .3s ease-out;}
+
+@keyframes segIn{from{opacity:0;}to{opacity:1;}}
+.seg-in{animation:segIn .34s ease-out backwards;}
+
+/* the figure settles once the ring has closed */
+@keyframes riseIn{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
+.donutCentre{animation:riseIn .45s ease-out .5s backwards;}
+
+/* then the legend arrives, a row at a time */
+@keyframes rowIn{from{opacity:0;transform:translateY(5px);}to{opacity:1;transform:none;}}
+.legendRow{animation:rowIn .34s ease-out backwards;}
+
+@media (prefers-reduced-motion:reduce){
+  .ringWrap,.seg-in,.donutCentre,.legendRow{animation:none;}
+}
 
 .spin{animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
@@ -1964,7 +2019,114 @@ function Home(props) {
 
           {/* The answer appears where the question was asked. A floating bar at
               the bottom sat inside the transformed swipe track and drifted off. */}
-          {toast && toast.filed ? (
+          {rows && rows.length > 0 ? (
+            <div className="reviewBox">
+              <div className="reviewHead">
+                <span className="filedTick" aria-hidden="true"><Check size={13} /></span>
+                <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>
+                  Found {rows.length} {rows.length === 1 ? "transaction" : "transactions"}
+                </span>
+                <button className="icon" onClick={() => setRows(null)} aria-label="Discard">
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="reviewList">
+                {rows.map((r, i) => {
+                  const cat = config.categories.find((c) => c.id === r.categoryId);
+                  const card = (config.cards || []).find((c) => c.id === r.cardId);
+                  const set = (patch) => setRows(rows.map((x, n) => (n === i ? { ...x, ...patch } : x)));
+                  return (
+                    <div key={r.id} className="reviewRow" style={{ opacity: r.keep ? 1 : .4 }}>
+                      <button className="icon" style={{ padding: 2 }}
+                        onClick={() => set({ keep: !r.keep })}
+                        aria-label={r.keep ? "Skip this one" : "Include this one"}>
+                        <span className="tickBox" data-on={r.keep ? "1" : "0"}>
+                          {r.keep ? <Check size={12} /> : null}
+                        </span>
+                      </button>
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: "hidden",
+                            textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.note}</span>
+                          <span className="num" style={{ fontSize: 13.5, fontWeight: 600,
+                            color: r.kind === "income" ? "var(--leaf)" : undefined }}>
+                            {r.kind === "income" ? "+" : ""}{money(r.amount)}
+                          </span>
+                        </div>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
+                          <span style={{ fontSize: 11, color: "var(--muted)", flex: "none" }}>
+                            {fmtDay(r.date)}
+                          </span>
+
+                          {/* The parser reads the direction from the wording, which
+                              differs between banks. One tap corrects it. */}
+                          <button className="miniTag" data-kind={r.kind}
+                            onClick={() => set({
+                              kind: r.kind === "income" ? "expense" : "income",
+                              categoryId: r.kind === "income"
+                                ? (localParse(`${r.amount} ${r.note}`, config, r.date)?.catId || "other")
+                                : "__income",
+                            })}>
+                            {r.kind === "income" ? "money in" : "money out"}
+                          </button>
+
+                          {r.kind !== "income" && (
+                            <>
+                              <button className="miniTag" data-src={r.src === "card" ? "card" : "bank"}
+                                onClick={() => {
+                                  const first = (config.cards || [])[0];
+                                  set(r.src === "card"
+                                    ? { src: "bank", cardId: "" }
+                                    : { src: "card", cardId: first ? first.id : "" });
+                                }}>
+                                {r.src === "card" ? (card ? card.name : "card") : "cash"}
+                              </button>
+
+                              {/* Every category, side by side — the guess is often
+                                  close but not right, and fixing it later is a chore. */}
+                              <div className="catScroll">
+                                {config.categories.map((c) => (
+                                  <button key={c.id} className="catPick"
+                                    data-on={r.categoryId === c.id ? "1" : "0"}
+                                    style={{ "--c": c.color }}
+                                    onClick={() => set({ categoryId: c.id })}>
+                                    {c.name}
+                                  </button>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ display: "flex", gap: 8, padding: "11px 12px 12px" }}>
+                <button className="btn gold" style={{ flex: 1 }}
+                  disabled={!rows.some((r) => r.keep)}
+                  onClick={async () => {
+                    const keep = rows.filter((r) => r.keep).map((r) => {
+                      const { keep: _k, ...entry } = r;
+                      return { ...entry, categoryId: entry.categoryId || "other" };
+                    });
+                    const prev = tx;
+                    await saveTx([...keep, ...tx]);
+                    setRows(null);
+                    setToast({ prevTx: prev, prevConfig: config,
+                      filed: { icon: "out", text: `Added ${keep.length} ${keep.length === 1 ? "entry" : "entries"}` } });
+                    dismissToast();
+                  }}>
+                  Add {rows.filter((r) => r.keep).length}
+                </button>
+                <button className="btn" style={{ flex: 1 }} onClick={() => setRows(null)}>Cancel</button>
+              </div>
+            </div>
+          ) : toast && toast.filed ? (
             <div className={`filedRow ${toast.leaving ? "leaving" : ""}`}>
               <span className="filedTick" aria-hidden="true"><Check size={13} /></span>
               <span className="filedDot" style={{
@@ -2069,80 +2231,6 @@ function Home(props) {
             </div>
           </div>
         </div>
-
-        {rows && rows.length > 0 && (
-          <div className="panel" style={{ marginTop: 10 }}>
-            <div style={{ padding: "14px 15px 0", display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="eyebrow" style={{ flex: 1 }}>
-                Found {rows.filter((r) => r.keep).length} of {rows.length} — check before adding
-              </span>
-              <button className="icon" onClick={() => setRows(null)} aria-label="Discard">
-                <X size={16} />
-              </button>
-            </div>
-
-            <div style={{ maxHeight: 320, overflowY: "auto", padding: "10px 15px 0" }}>
-              {rows.map((r, i) => {
-                const cat = config.categories.find((c) => c.id === r.categoryId);
-                const card = (config.cards || []).find((c) => c.id === r.cardId);
-                return (
-                  <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9,
-                    padding: "9px 0", borderTop: i ? "1px solid var(--line)" : "none",
-                    opacity: r.keep ? 1 : .4 }}>
-                    <button className="icon" style={{ padding: 2 }}
-                      onClick={() => setRows(rows.map((x, n) => n === i ? { ...x, keep: !x.keep } : x))}
-                      aria-label={r.keep ? "Skip this one" : "Include this one"}>
-                      <span style={{ width: 19, height: 19, borderRadius: 6, display: "flex",
-                        alignItems: "center", justifyContent: "center",
-                        border: `1.5px solid ${r.keep ? "var(--leaf)" : "var(--line)"}`,
-                        background: r.keep ? "var(--leaf)" : "transparent",
-                        color: "var(--leather)" }}>
-                        {r.keep ? <Check size={12} /> : null}
-                      </span>
-                    </button>
-                    <span style={{ color: "var(--muted)", flex: "none", width: 46, fontSize: 12 }}>
-                      {fmtDay(r.date)}
-                    </span>
-                    <span className="payTag" data-src={r.src === "card" ? "card" : "bank"}>
-                      {r.kind === "income" ? "in" : r.src === "card" ? "card" : "cash"}
-                    </span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: "hidden",
-                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {r.note}
-                      <span style={{ color: "var(--muted)", fontSize: 11, marginLeft: 6 }}>
-                        {r.kind === "income" ? "Money in" : cat ? cat.name : "Other"}
-                        {card ? ` · ${card.name}` : ""}
-                      </span>
-                    </span>
-                    <span className="num" style={{ fontSize: 13.5, fontWeight: 600 }}>
-                      {money(r.amount)}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ display: "flex", gap: 8, padding: "12px 15px 15px" }}>
-              <button className="btn gold" style={{ flex: 1 }}
-                disabled={!rows.some((r) => r.keep)}
-                onClick={async () => {
-                  const keep = rows.filter((r) => r.keep).map((r) => {
-                    const { keep: _k, ...entry } = r;
-                    return { ...entry, categoryId: entry.categoryId || "other" };
-                  });
-                  const prev = tx;
-                  await saveTx([...keep, ...tx]);
-                  setRows(null);
-                  setToast({ prevTx: prev, prevConfig: config,
-                    filed: { icon: "out", text: `Added ${keep.length} ${keep.length === 1 ? "entry" : "entries"}` } });
-                  dismissToast();
-                }}>
-                Add {rows.filter((r) => r.keep).length}
-              </button>
-              <button className="btn" style={{ flex: 1 }} onClick={() => setRows(null)}>Cancel</button>
-            </div>
-          </div>
-        )}
 
         {pasteMsg && (
           <div className="hint" style={{ color: "var(--amber)" }}>{pasteMsg}</div>
@@ -2832,7 +2920,9 @@ function Setup(props) {
                   return (
                     <button key={c.id} className="legendRow"
                       onClick={() => setSlice(on ? "" : c.id)}
-                      style={{ animationDelay: `${0.5 + i * 0.045}s`,
+                      /* Fixed spacing stretched to nearly three seconds with
+                         forty categories; this keeps the whole thing near a second. */
+                      style={{ animationDelay: `${0.5 + i * Math.min(0.045, 0.5 / Math.max(1, parts.length))}s`,
                         display: "flex", alignItems: "center", gap: 9, width: "100%",
                         background: on ? tint(c.color, .14) : "transparent", border: "none",
                         borderRadius: 9, padding: "8px 9px", cursor: "pointer", color: "inherit",
