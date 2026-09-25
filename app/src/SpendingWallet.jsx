@@ -467,7 +467,10 @@ export function splitPictureText(raw, today) {
   };
   for (const line of fixOcr(raw).split(/\r?\n/)) {
     const t = line.replace(/\s+/g, " ").trim();
-    if (!t) { flush(); continue; }
+    /* A gap ends a transaction only once it has its amount. The reader also
+       leaves gaps inside one — between a shop's name and its amount — and
+       ending there threw the name away. */
+    if (!t) { if (cur.some((l) => AMOUNT_IN_LINE.test(l))) flush(); continue; }
     const d = dateLine(t, today);
     if (d) { flush(); head = d; continue; }
     let carry = [];
@@ -494,26 +497,52 @@ const LABEL_LINE = /^(?:(?:pos|card|debit card|credit card|online|contactless|ap
 const AMOUNT_ANYWHERE = /[+\-−–]?\s*(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[+\-−–]?\s*[\d,]*\d\.\d{2}(?![.\d\/])\s*(?:AED|DHS?)?/gi;
 const DATE_ANYWHERE = /\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b|\b\d{1,2}[\s\-](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:[\s\-]\d{2,4})?\b|\b\d{1,2}:\d{2}(?:\s?[ap]m)?\b/gi;
 
+/* Who sent the notification, not who was paid. Wallet and bank notifications
+   put the bank's name on the first line and the shop under it, and taking the
+   first line filed every purchase as "First Abu Dhabi Bank". No word
+   boundaries: the reader often runs words together ("FirstvAbu Dhabi"). */
+const SENDER = /abu ?dhabi|emirates ?nbd|emirates ?islamic|mashreq|rakbank|dubai ?islamic|islamic ?bank|commercial ?bank|first ?abu|\b(?:fab|adib|adcb|enbd|dib|cbd|hsbc|wio|liv|citi(?:bank)?|bank|wallet|apple ?pay|tabby|tamara)\b/i;
+
+/* "Sun 13:40", "Fri 23:03", "Yesterday": a notification's time, which names
+   the day but not the date. It's the latest such day up to today. */
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function weekdayDate(line, today) {
+  if (/\byesterday\b/i.test(line)) return toDMY(addDays(today, -1));
+  if (/\b(?:today|now|\d{1,2}\s?[mh] ago)\b/i.test(line)) return toDMY(today);
+  const m = line.match(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]{0,6}\s*\S?\d{1,2}[:.]\d{2}\b|\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*day\b/i);
+  if (!m) return null;
+  const want = WEEKDAYS.indexOf((m[1] || m[2]).toLowerCase());
+  const now = new Date(`${today}T00:00:00Z`).getUTCDay();
+  return toDMY(addDays(today, -((now - want + 7) % 7)));
+}
+
 /* Who the money went to or came from. Messages say it in a sentence — "at
-   Carrefour", "for Talabat" — and bank apps put it on its own line in normal
-   case. The pasted-message reader only knew names in capitals, so on a
-   picture almost every row came out as "Bank alert". */
-function pictureName(seg) {
-  const said = seg.text.match(/\b(?:at|to|for|from)\s+([A-Z][A-Za-z0-9&'.\- ]{2,44})/);
-  if (said && !/^(?:AED|DHS?)\b/.test(said[1])) {
+   Carrefour", "for Talabat" — and bank apps and notifications put it on its
+   own line in normal case. */
+function pictureName(seg, isSender) {
+  /* In a message, a short line is a scrap of the sentence wrapped onto its
+     own line — "credited to account ending 3391 on" — not a name. A message
+     is told by its small words, not its length: "First Abu Dhabi Bank Fri
+     22:38" is long, but it's a heading. */
+  const message = seg.lines.some((l) => (l.match(/\b[a-z]{2,}\b/g) || []).length >= 3)
+    || /\b(your|account|ending|has been|credited|debited|spent)\b/i.test(seg.text);
+  if (message) {
+    const said = seg.text.match(/\b(?:at|to|for|from)\s+([A-Z][A-Za-z0-9&'.\- ]{2,44})/);
+    if (!said || /^(?:AED|DHS?)\b/.test(said[1])) return "";
     const n = said[1]
       .replace(/\s+\b(on|using|from|with|via|at|for|to|your|dated|ref|through|card|account|is|was|has)\b.*$/i, "")
       .replace(/[\s.,;:-]+$/, "").trim();
-    if (n.length >= 3) return n;
+    return n.length >= 3 ? n : "";
   }
-  /* In a message, a short line is a scrap of the sentence wrapped onto its
-     own line — "credited to account ending 3391 on" — not a name. */
-  const message = seg.lines.some((l) => l.split(" ").length > 6)
-    || /\b(your|account|ending|has been|credited|debited|spent)\b/i.test(seg.text);
-  if (message) return "";
-  for (const line of seg.lines) {
-    const n = lineName(line);
-    if (n) return n;
+  /* Nearest the amount wins: its own line, then upwards, then downwards.
+     Starting from the top picked up the sender, or the clock in the status bar. */
+  const at = seg.lines.findIndex((l) => AMOUNT_IN_LINE.test(l));
+  const order = [at];
+  for (let i = at - 1; i >= 0; i--) order.push(i);
+  for (let i = at + 1; i < seg.lines.length; i++) order.push(i);
+  for (const i of order) {
+    const n = lineName(seg.lines[i]);
+    if (n && !isSender(n)) return n;
   }
   return "";
 }
@@ -524,14 +553,35 @@ function pictureName(seg) {
 function lineName(line) {
   if (line.split(" ").length > 6) return "";
   const n = line.replace(AMOUNT_ANYWHERE, " ").replace(DATE_ANYWHERE, " ")
-    .replace(/\s+/g, " ").replace(/^[\s+\-−–.,;:|]+|[\s+\-−–.,;:|]+$/g, "").trim();
+    .replace(/\b(?:sun|mon|tue|wed|thu|fri|sat)[a-z]{0,6}\s*\S?(?=\s|$)|\b(?:today|yesterday|now)\b/gi, (w) =>
+      /^(?:sun|mon|tue|wed|thu|fri|sat)[a-z]{0,2}$|^(?:today|yesterday|now)$/i.test(w.trim()) ? " " : w)
+    // the app icon beside a notification reads as stray marks: "&", "|", "‘"
+    .replace(/\s+/g, " ").replace(/^[^A-Za-z0-9؀-ۿ*]+|[^A-Za-z0-9؀-ۿ)]+$/g, "").trim();
   return (n.match(/[A-Za-z؀-ۿ]/g) || []).length >= 3 && !LABEL_LINE.test(n) ? n : "";
 }
 
 export function parsePicture(raw, config, today) {
+  const segs = splitPictureText(raw, today);
+
+  /* A name on most rows is whoever sent them all — a bank this list doesn't
+     know yet, say. A shop you visit three times still has other rows between. */
+  const seen = {};
+  const key = (n) => n.toLowerCase().replace(/[^a-z]/g, "");
+  for (const seg of segs) {
+    for (const k of new Set(seg.lines.map((l) => key(lineName(l))).filter(Boolean))) seen[k] = (seen[k] || 0) + 1;
+  }
+  const cards = (config.cards || []).map((c) => key(String(c.name || ""))).filter((k) => k.length > 2);
+  const isSender = (n) => SENDER.test(n)
+    || (segs.length >= 4 && seen[key(n)] >= segs.length * 0.75)
+    || cards.some((c) => key(n) === c);
+
   const out = [];
-  for (const seg of splitPictureText(raw, today)) {
-    const text = seg.date && !HAS_DATE.test(seg.text) ? `${seg.date} ${seg.text}` : seg.text;
+  for (const seg of segs) {
+    const at = seg.lines.findIndex((l) => AMOUNT_IN_LINE.test(l));
+    let day = "";
+    for (let i = at; i >= 0 && !day; i--) day = weekdayDate(seg.lines[i], today) || "";
+    const date = day || seg.date;
+    const text = date && !HAS_DATE.test(seg.text) ? `${date} ${seg.text}` : seg.text;
     const [row] = parseAlerts(text, config, today);
     if (!row) continue;
 
@@ -545,7 +595,10 @@ export function parsePicture(raw, config, today) {
       Object.assign(row, { kind: "expense",
         categoryId: localParse(`${row.amount} ${row.note}`, config, row.date)?.catId || "other" });
     }
-    const name = pictureName(seg).slice(0, 40);
+    const name = pictureName(seg, isSender).slice(0, 40);
+    /* "Bank alert" read like a real name and got saved as one. An empty name
+       asks to be filled in instead. */
+    if (!name && row.kind === "expense" && row.note === "Bank alert") row.note = "";
     if (name) {
       row.note = name;
       // the category was guessed from "Bank alert"; guess again from the real name
@@ -553,9 +606,25 @@ export function parsePicture(raw, config, today) {
         row.categoryId = localParse(`${row.amount} ${name}`, config, row.date)?.catId || row.categoryId;
       }
     }
-    out.push({ ...row, id: `${Date.now()}-p${out.length}` });
+    const figure = (seg.lines[at].match(AMOUNT_IN_LINE) || [""])[0];
+    out.push({ ...row, cents: /\.\d{2}/.test(figure), id: `${Date.now()}-p${out.length}` });
   }
-  return out;
+
+  /* A lost decimal point turns 71.50 into 7,150 — plausible, large, and
+     exactly the kind of wrong figure that goes unquestioned. When the others
+     all show fils and one doesn't, it's left unticked for you to check. */
+  /* The app icon beside a notification sometimes reads as two letters
+     stuck to the name: "Fg Lenador Systems". If the rest is a name another
+     row has, it's that name. */
+  for (const r of out) {
+    const m = r.note.match(/^\S{1,2} (.+)$/);
+    if (m && out.some((o) => o !== r && o.note === m[1])) r.note = m[1];
+  }
+
+  const withCents = out.filter((r) => r.cents).length;
+  return out.map(({ cents, ...r }) =>
+    withCents >= 2 && withCents >= out.length / 2 && !cents && r.amount >= 100
+      ? { ...r, keep: false, doubt: true } : r);
 }
 
 let ocrLoading = null;
@@ -575,9 +644,14 @@ function loadOcr() {
   return ocrLoading;
 }
 
-/* Grey, the right way up for the reader, and not so large that an iPhone runs
-   out of canvas. Dark-mode screenshots are inverted: the reader was trained
-   on dark text on light paper and misses a lot of light-on-dark. */
+/* Dark ink on white paper, which is what the reader was trained on, and not
+   so large that an iPhone runs out of canvas.
+
+   Each pixel is judged against its own neighbourhood, not the whole picture:
+   ink is whatever differs from the background around it, light or dark. One
+   lock-screen screenshot holds white text on dark red and white text on pale
+   beige; inverting the whole picture made the beige rows vanish, and two
+   real purchases were lost that way. */
 async function preparePicture(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -590,7 +664,9 @@ async function preparePicture(file) {
     const w0 = img.naturalWidth, h0 = img.naturalHeight;
     if (!w0 || !h0) throw new Error("not a picture");
     let scale = Math.min(1, Math.sqrt(8e6 / (w0 * h0)), 2400 / w0);
-    if (w0 < 900) scale = Math.min(2, 1200 / w0);   // small text reads better enlarged
+    /* Enlarged, because a decimal point is only a few pixels on a phone
+       screenshot: missed, "AED 71.50" reads as 7,150. */
+    if (w0 < 1600) scale = Math.min(2.5, 2000 / w0, Math.sqrt(8e6 / (w0 * h0)));
     const w = Math.round(w0 * scale), h = Math.round(h0 * scale);
     const canvas = document.createElement("canvas");
     canvas.width = w; canvas.height = h;
@@ -598,14 +674,31 @@ async function preparePicture(file) {
     g.drawImage(img, 0, 0, w, h);
     const px = g.getImageData(0, 0, w, h);
     const d = px.data;
-    let sum = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      d[i] = d[i + 1] = d[i + 2] = y;
-      sum += y;
+    const lum = new Uint8ClampedArray(w * h);
+    for (let p = 0, i = 0; p < lum.length; p++, i += 4) {
+      lum[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     }
-    if (sum / (d.length / 4) < 110) {
-      for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = 255 - d[i];
+    // running sums, so each neighbourhood's average costs four lookups
+    const W = w + 1, sums = new Uint32Array(W * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let row = 0;
+      for (let x = 0; x < w; x++) {
+        row += lum[y * w + x];
+        sums[(y + 1) * W + x + 1] = sums[y * W + x + 1] + row;
+      }
+    }
+    // wide enough to take in a few letters and the background around them
+    const r = Math.max(12, Math.round(Math.min(w, h) / 12));
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+        const mean = (sums[y1 * W + x1] - sums[y0 * W + x1] - sums[y1 * W + x0] + sums[y0 * W + x0])
+          / ((y1 - y0) * (x1 - x0));
+        const v = 255 - Math.min(255, Math.abs(lum[y * w + x] - mean) * 1.5);
+        const i = (y * w + x) * 4;
+        d[i] = d[i + 1] = d[i + 2] = v;
+      }
     }
     g.putImageData(px, 0, 0);
     return canvas;
@@ -812,6 +905,13 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.50.2", items: [
+    "Screenshots of Wallet notifications now name the shop, not your bank",
+    "“Sun 13:40” or “Fri 23:03” on a notification sets the day, instead of everything landing on today",
+    "White text on a pale background is read properly, so purchases on light-coloured notifications aren't missed",
+    "If an amount seems to have lost its decimal point (7150 where the rest read 71.50), it's left unticked for you to check",
+    "When a name can't be read, the box asks you to type it instead of saying “Bank alert”",
+  ]},
   { v: "0.50.1", items: [
     "Entries from a picture now get the shop's name instead of “Bank alert”. Names written in normal letters, like “Carrefour Hypermarket”, weren't recognised before",
     "Works whether the name sits above, beside or below the amount, and for messages that say “for Talabat”",
@@ -1167,6 +1267,7 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
   border-bottom:1px solid var(--line);}
 .reviewEdit{font:inherit;background:none;border:none;border-bottom:1px dashed var(--line);
   color:inherit;padding:0 0 1px;outline:none;border-radius:0;}
+.reviewEdit::placeholder{color:var(--amber);opacity:1;}
 .reviewEdit:focus{border-bottom:1px solid var(--gold);}
 .tickBox{width:19px;height:19px;border-radius:6px;display:flex;align-items:center;
   justify-content:center;border:1.5px solid var(--line);color:var(--leather);}
@@ -2352,6 +2453,7 @@ function Home(props) {
                           {/* Both editable: a misread figure or a garbled shop name
                               is quicker to fix here than after it's saved. */}
                           <input className="reviewEdit" value={r.note} aria-label="What it was"
+                            placeholder="Couldn't read the name, type it"
                             onChange={(e) => set({ note: e.target.value.slice(0, 40) })}
                             style={{ flex: 1, minWidth: 0, fontSize: 13 }} />
                           <span className="num" style={{ fontSize: 13.5, fontWeight: 600, flex: "none",
@@ -2359,13 +2461,18 @@ function Home(props) {
                             {r.kind === "income" ? "+" : ""}
                             <input className="reviewEdit num" inputMode="decimal" aria-label="Amount"
                               value={r.amountText ?? (Number.isInteger(r.amount) ? String(r.amount) : r.amount.toFixed(2))}
-                              onChange={(e) => set({ amountText: e.target.value,
+                              onChange={(e) => set({ amountText: e.target.value, doubt: false,
                                 amount: Number(e.target.value.replace(/,/g, "")) })}
                               style={{ width: `${Math.max(3, String(r.amountText ?? r.amount.toFixed(2)).length) + 1}ch`,
                                 textAlign: "right", fontWeight: 600, color: "inherit",
-                                borderColor: r.amount > 0 ? undefined : "var(--amber)" }} />
+                                borderColor: r.amount > 0 && !r.doubt ? undefined : "var(--amber)" }} />
                           </span>
                         </div>
+                        {r.doubt && (
+                          <div style={{ fontSize: 11, color: "var(--amber)", marginTop: 3 }}>
+                            No fils on this one, unlike the rest. Check the amount, then tick it.
+                          </div>
+                        )}
 
                         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
                           <span style={{ fontSize: 11, color: "var(--muted)", flex: "none" }}>
@@ -2422,8 +2529,10 @@ function Home(props) {
                   disabled={!rows.some((r) => r.keep) || rows.some((r) => r.keep && !(r.amount > 0))}
                   onClick={async () => {
                     const keep = rows.filter((r) => r.keep).map((r) => {
-                      const { keep: _k, amountText: _a, ...entry } = r;
-                      return { ...entry, categoryId: entry.categoryId || "other" };
+                      const { keep: _k, amountText: _a, doubt: _d, ...entry } = r;
+                      return { ...entry, categoryId: entry.categoryId || "other",
+                        note: String(entry.note || "").trim()
+                          || (entry.kind === "income" ? "Money in" : "Expense") };
                     });
                     const prev = tx;
                     await saveTx([...keep, ...tx]);

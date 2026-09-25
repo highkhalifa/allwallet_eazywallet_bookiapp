@@ -166,6 +166,21 @@ console.log("\nREADING TEXT FROM A PICTURE");
   ok("a name after \"for\" in a message", names("Your card ending 1234 was debited AED 45.00 for Talabat on 25/08/2026") === "Talabat");
   ok("the category is guessed from the name", parsePicture("Carrefour Hypermarket\n-45.00 AED", config, "2026-09-02")[0]?.categoryId === "groceries");
 
+  /* Wallet notifications on a lock screen, as the reader returned them —
+     the status bar, icon marks and run-together words included. Names and
+     amounts changed from the real screenshot; the layout and noise are not.
+     0.50.1 named every row after the bank, dated them all today, and would
+     have kept a figure that lost its decimal point. */
+  const lock = "“073594 ET RE 71 Ls\n‘ First Abu Dhabi Bank Sun 13:40\nZiina *sample name 5\n& AED 50.00 -\ny\nFirst Abu Dhabi Bank Fri 23:03\n& AED 100.00 LE\ny\n| First Abu Dhabi Bank Fri 22:38\nThe Falafel Corner\n& AED 90.99 L\n~~\nFirst Abu Dhabi Bank Fri 21:03\nAuh National Exhibitio\n& AED 40.00 L\ny\n| First Abu Dhabi Bank Fri 20:31\nCapital Catering Servi\n5 AED 60.00\npr . .\nPe grist Abu Dhabi Bank Fri 20:20\nahoaibsldy 2 Se 1\nNorthwind Kiosk\nAED 7150\n& WwFirstvAbu Dhabi Bank Fri 20:00\nFg Northwind Kiosk\n\\ AED 26.00 oy |\n= First Abu Dhabi Bank Frif19:18\nNorthwind Kiosk\n& AED 90.00\n. J\n";
+  const L = parsePicture(lock, config, "2026-09-28");   // a Monday
+  ok("notifications: the shop, not the bank", L.map((r) => r.note).join(" | ") ===
+    "Ziina *sample name 5 |  | The Falafel Corner | Auh National Exhibitio | Capital Catering Servi | Northwind Kiosk | Northwind Kiosk | Northwind Kiosk",
+    L.map((r) => r.note).join(" | "));
+  ok("notifications: Sun and Fri become dates", L[0]?.date === "2026-09-27" && L[1]?.date === "2026-09-25",
+    `${L[0]?.date} ${L[1]?.date}`);
+  ok("a figure missing its fils is held back", L[5]?.amount === 7150 && L[5]?.doubt && !L[5]?.keep);
+  ok("figures with fils are kept", L.filter((r) => r.keep).length === 7);
+
   const slips = parsePicture("AED 1O5.5O spent at NOON on 03/09/2026", config, "2026-09-05");
   ok("O read for 0 inside a figure is fixed", slips[0]?.amount === 105.5, String(slips[0]?.amount));
   const dotted = parsePicture("AED 45.00 spent at LULU\non 03.09.2026", config, "2026-09-05");
