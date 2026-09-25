@@ -905,6 +905,10 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.50.3", items: [
+    "Dragging the row of categories left and right scrolls the categories, instead of sliding the whole page to another tab",
+    "Same fix for the category filter in History",
+  ]},
   { v: "0.50.2", items: [
     "Screenshots of Wallet notifications now name the shop, not your bank",
     "“Sun 13:40” or “Fri 23:03” on a notification sets the day, instead of everything landing on today",
@@ -2505,7 +2509,10 @@ function Home(props) {
 
                               {/* Every category, side by side — the guess is often
                                   close but not right, and fixing it later is a chore. */}
-                              <div className="catScroll">
+                              {/* Scrolls sideways under the finger. Without
+                                  data-owns-drag the tab swipe took the gesture
+                                  and the whole page slid to the next tab. */}
+                              <div className="catScroll" data-owns-drag>
                                 {config.categories.map((c) => (
                                   <button key={c.id} className="catPick"
                                     data-on={r.categoryId === c.id ? "1" : "0"}
@@ -3043,7 +3050,7 @@ function History({ tx, config, saveTx, learn, cycle }) {
         )}
       </div>
 
-      <div className="catScroll" style={{ marginBottom: 12, paddingTop: 4 }}>
+      <div className="catScroll" data-owns-drag style={{ marginBottom: 12, paddingTop: 4 }}>
         {config.categories.map((c) => {
           const n = tx.filter((t) => t.categoryId === c.id).length;
           if (!n) return null;

@@ -1,5 +1,5 @@
-const BUILD_VERSION = "0.50.2";
-const CACHE = "wallet-v86";
+const BUILD_VERSION = "0.50.3";
+const CACHE = "wallet-v87";
 
 /* Tell every open page which build just arrived.
 
