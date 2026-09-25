@@ -2528,28 +2528,136 @@ function Cards({ config, saveConfig, tx, saveTx, m }) {
 
 /* ---------- history ---------- */
 
-function History({ tx, config, saveTx, learn }) {
+function History({ tx, config, saveTx, learn, cycle }) {
   const [editTx, setEditTx] = useState(null);
+  const [sort, setSort] = useState("recent");
+  const [catFilter, setCatFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("all");
+  const [range, setRange] = useState("all");
   const catOf = (id) => config.categories.find((c) => c.id === id) || { name: "Other", color: "#5E8C8C" };
 
+  /* Filtering and sorting are separate questions: what am I looking at, and in
+     what order. Kept apart so you can combine them freely. */
+  const shown = useMemo(() => {
+    let list = tx;
+    if (catFilter) list = list.filter((t) => t.categoryId === catFilter);
+    if (kindFilter === "out") list = list.filter((t) => t.kind === "expense");
+    if (kindFilter === "in") list = list.filter((t) => t.kind === "income");
+    if (kindFilter === "card") list = list.filter((t) => t.kind === "expense" && t.src === "card");
+    if (kindFilter === "repay") list = list.filter((t) => t.kind === "cardpay");
+    if (range === "cycle" && cycle) {
+      list = list.filter((t) => t.date >= cycle.start && t.date <= cycle.end);
+    }
+    return list;
+  }, [tx, catFilter, kindFilter, range, cycle]);
+
+  /* Sorted by amount, the day-by-day grouping stops making sense — a flat list
+     is what you actually want when hunting for the big ones. */
+  const flat = useMemo(() => {
+    const list = [...shown];
+    if (sort === "highest") return list.sort((a, b) => b.amount - a.amount);
+    if (sort === "lowest") return list.sort((a, b) => a.amount - b.amount);
+    return null;
+  }, [shown, sort]);
+
   const groups = useMemo(() => {
+    if (flat) return null;
     const by = {};
-    for (const t of tx) (by[t.date] = by[t.date] || []).push(t);
-    return Object.entries(by).sort((a, b) => b[0].localeCompare(a[0]));
-  }, [tx]);
+    for (const t of shown) (by[t.date] = by[t.date] || []).push(t);
+    return Object.entries(by).sort((a, b) =>
+      sort === "oldest" ? a[0].localeCompare(b[0]) : b[0].localeCompare(a[0]));
+  }, [shown, flat, sort]);
+
+  const shownTotal = shown.reduce((s, t) => s + (t.kind === "expense" ? t.amount : 0), 0);
 
   return (
     <>
       <div className="eyebrow" style={{ marginBottom: 6 }}>Everything you've logged</div>
-      <div className="empty" style={{ padding: "0 0 6px" }}>
-        Tap any entry to fix the note, amount, date, category — or what it is.
+      <div className="empty" style={{ padding: "0 0 10px" }}>
+        {shown.length} of {tx.length} entries · <b className="num">{money(shownTotal)}</b> spent
+        {(catFilter || kindFilter !== "all" || range !== "all") && (
+          <button className="mini ghost" style={{ marginLeft: 8, marginTop: 0 }}
+            onClick={() => { setCatFilter(""); setKindFilter("all"); setRange("all"); }}>
+            Clear filters
+          </button>
+        )}
       </div>
 
-      {!groups.length && (
-        <div className="empty">Nothing here yet. Tell your wallet what you spent and it'll show up.</div>
+      <div className="seg segSm" role="tablist" aria-label="Sort by" style={{ marginBottom: 8 }}>
+        {[["recent", "Newest"], ["oldest", "Oldest"], ["highest", "Biggest"], ["lowest", "Smallest"]]
+          .map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={sort === id}
+              className={`segBtn ${sort === id ? "on" : ""}`}
+              onClick={() => setSort(id)}>{label}</button>
+          ))}
+      </div>
+
+      <div className="chips" style={{ marginBottom: 4 }}>
+        {[["all", "Everything"], ["out", "Money out"], ["in", "Money in"],
+          ["card", "On a card"], ["repay", "Repayments"]].map(([id, label]) => (
+          <button key={id} className={`chip ${kindFilter === id ? "on" : ""}`}
+            onClick={() => setKindFilter(id)}>{label}</button>
+        ))}
+        {cycle && (
+          <button className={`chip ${range === "cycle" ? "on" : ""}`}
+            onClick={() => setRange(range === "cycle" ? "all" : "cycle")}>
+            This cycle only
+          </button>
+        )}
+      </div>
+
+      <div className="catScroll" style={{ marginBottom: 12, paddingTop: 4 }}>
+        {config.categories.map((c) => {
+          const n = tx.filter((t) => t.categoryId === c.id).length;
+          if (!n) return null;
+          return (
+            <button key={c.id} className="catPick" data-on={catFilter === c.id ? "1" : "0"}
+              style={{ "--c": c.color }}
+              onClick={() => setCatFilter(catFilter === c.id ? "" : c.id)}>
+              {c.name} <span className="num" style={{ opacity: .6 }}>{n}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {!shown.length && (
+        <div className="empty">
+          {tx.length ? "Nothing matches those filters." : "Nothing here yet. Tell your wallet what you spent and it'll show up."}
+        </div>
       )}
 
-      {groups.map(([date, items], gi) => {
+      {/* Sorted by size, dates stop being the organising idea — show a plain
+          ranked list with each entry's share of the total. */}
+      {flat && flat.map((t) => {
+        const share = shownTotal > 0 && t.kind === "expense" ? t.amount / shownTotal : 0;
+        return (
+          <button key={t.id} onClick={() => setEditTx(t)}
+            style={{ display: "flex", alignItems: "center", gap: 11, width: "100%",
+              padding: "11px 0", borderBottom: "1px solid var(--line)",
+              background: "none", border: "none", borderBottomStyle: "solid",
+              cursor: "pointer", color: "inherit", font: "inherit", textAlign: "left" }}>
+            <span className="dot" style={{ background: t.kind === "income" ? "var(--gold)"
+              : t.kind === "cardpay" ? "var(--leaf)" : catOf(t.categoryId).color }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {t.note}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                {fmtDay(t.date)} · {t.kind === "income" ? "Money in"
+                  : t.kind === "cardpay" ? "Card repayment" : catOf(t.categoryId).name}
+                {share > 0.02 && ` · ${Math.round(share * 100)}% of the total`}
+              </div>
+            </div>
+            <span className="num" style={{ fontSize: 15, fontWeight: 500,
+              color: t.kind === "income" ? "var(--gold)" : t.kind === "cardpay" ? "var(--leaf)" : undefined }}>
+              {t.kind === "income" ? "+" : t.kind === "cardpay" ? "↩ " : ""}{money(t.amount)}
+            </span>
+            <Pencil size={13} style={{ color: "var(--muted)", flex: "none" }} />
+          </button>
+        );
+      })}
+
+      {groups && groups.map(([date, items], gi) => {
         /* A month header whenever the month changes, with that month's total. */
         const prevDate = gi > 0 ? groups[gi - 1][0] : null;
         const newMonth = !prevDate || date.slice(0, 7) !== prevDate.slice(0, 7);
