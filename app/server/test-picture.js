@@ -63,7 +63,8 @@ const CDN = {
     "@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz",
 };
 const asked = [];
-const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3 });
+const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3,
+  hasTouch: true });
 await context.route("**/*", (route) => {
   const url = route.request().url();
   if (url.startsWith("https://wallet.test/")) {
@@ -164,7 +165,7 @@ await page.evaluate((c) => {
 await page.reload();
 await page.waitForSelector('input[type=file][accept="image/*"]', { state: "attached" });
 
-const read = async (file) => {
+const read = async (file, keepOpen = false) => {
   await page.setInputFiles('input[type=file][accept="image/*"]', file);
   await page.waitForSelector(".reviewBox, .hint", { timeout: 120000 });
   await page.waitForFunction(() => document.querySelector(".reviewBox")
@@ -177,7 +178,7 @@ const read = async (file) => {
       .find((t) => /^\d{1,2} [A-Z][a-z]{2}$/.test(t)),
   })));
   const msg = await page.$$eval(".hint", (h) => h.map((x) => x.textContent).join(" | "));
-  if (await page.$(".reviewBox")) await page.click('button[aria-label="Discard"]');
+  if (!keepOpen && await page.$(".reviewBox")) await page.click('button[aria-label="Discard"]');
   return { rows, msg };
 };
 
@@ -228,6 +229,32 @@ console.log("\nREADING A PICTURE");
     rows.map((r) => r.note).join(" | "));
   ok("lock screen: days read", rows[0]?.date !== rows[1]?.date, rows.map((r) => r.date).join());
 }
+console.log("\nCHOOSING A CATEGORY BY TOUCH");
+/* A real finger drag, sent as touch input, on the row of categories. In 0.50.2
+   the tab swipe took it and the whole page slid to the Cards tab. */
+{
+  await read(bankAppTitle, true);
+  const box = () => page.$eval(".reviewBox", (el) => el.getBoundingClientRect().left);
+  const row = await page.$(".reviewRow .catScroll");
+  const r = await row.boundingBox();
+  const before = { left: await box(), scroll: await row.evaluate((el) => el.scrollLeft) };
+  const cdp = await context.newCDPSession(page);
+  const y = r.y + r.height / 2, x0 = r.x + r.width - 10;
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: x0, y }] });
+  for (let i = 1; i <= 12; i++) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x0 - i * 18, y }] });
+    await page.waitForTimeout(16);
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(600);
+  const after = { left: await box().catch(() => NaN), scroll: await row.evaluate((el) => el.scrollLeft) };
+  ok("dragging the categories doesn't change tab", Math.abs(after.left - before.left) < 2,
+    `review box moved ${Math.round(after.left - before.left)}px`);
+  ok("the categories scroll under the finger", after.scroll > before.scroll + 40,
+    `scrolled ${after.scroll - before.scroll}px`);
+  await page.click('button[aria-label="Discard"]');
+}
+
 {
   const pinned = (u) => CDN[u] || /tesseract\.js-core@v7\.0\.0\//.test(u);
   const reader = asked.filter((u) => /jsdelivr/.test(u));

@@ -209,6 +209,17 @@ const looksLikeQuestion = (raw) => {
   return QUESTION_HINTS.some((w) => low.includes(w)) && !/\d/.test(low);
 };
 
+/* The dirham is pegged to the dollar at 3.6725 and has been since 1997, so a
+   dollar price converts exactly, offline, with no rate to look up. Everything
+   is stored in dirhams — totals and budgets only ever add one currency — and
+   the dollar figure travels with the entry so you can see where it came from.
+   A card's own charge can differ by its foreign-exchange fee; the amount stays
+   editable for that. */
+export const USD_AED = 3.6725;
+const USD_WORDS = /\$|\busd\b|\bdollars?\b|دولار/i;
+export const toAed = (usd) => Math.round(usd * USD_AED * 100) / 100;
+const usdLabel = (usd) => `US$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 export function localParse(raw, config, today) {
   if (looksLikeQuestion(raw)) return null;
   const low = String(raw).toLowerCase();
@@ -237,6 +248,8 @@ export function localParse(raw, config, today) {
     if (match) { amount = Number(match.amount); fromPlan = match.name; }
   }
   if (!(amount > 0)) return null;
+  let usd = 0;
+  if (!fromPlan && USD_WORDS.test(low)) { usd = amount; amount = toAed(usd); }
 
   const has = (id) => config.categories.some((c) => c.id === id);
   const sourceNames = (config.incomes || [])
@@ -287,7 +300,7 @@ export function localParse(raw, config, today) {
 
   const note = raw
     .replace(/\d+(?:[.,]\d+)?/g, "")
-    .replace(/\b(aed|dhs?|dirhams?|درهم|دراهم)\b/gi, "")
+    .replace(/\b(aed|dhs?|dirhams?|درهم|دراهم|usd|dollars?|دولار)\b|\$/gi, "")
     .replace(/\s+/g, " ").trim().slice(0, 40);
 
   const isCardPay = CARDPAY_WORDS.some((w) => low.includes(w));
@@ -296,7 +309,7 @@ export function localParse(raw, config, today) {
   const src = !isCardPay && CARD_WORDS.some((w) => low.includes(w)) ? "card" : "bank";
 
   return {
-    amount, catId, isIncome: isIncome || !!fromPlan, isCardPay, src, fromPlan,
+    amount, usd, catId, isIncome: isIncome || !!fromPlan, isCardPay, src, fromPlan,
     note: note || fromPlan || (isIncome ? "Income" : isCardPay ? "Credit card payment" : "Expense"),
     date: today,
   };
@@ -322,11 +335,16 @@ export function parseAlerts(raw, config, today) {
   for (const c of chunks) {
     const low = c.toLowerCase();
 
-    // an amount attached to a currency marker beats a bare number
-    const cur = c.match(/(?:AED|د\.إ|DHS?)\s*([\d,]+(?:\.\d{1,2})?)/i)
-      || c.match(/([\d,]+\.\d{2})\b/);
-    if (!cur) continue;
-    const amount = Number(cur[1].replace(/,/g, ""));
+    /* An amount attached to a currency marker beats a bare number, and
+       dirhams beat dollars: a foreign purchase alert that also gives the
+       dirham figure is telling you what was actually charged. */
+    const aed = c.match(/(?:AED|د\.إ|DHS?)\s*([\d,]+(?:\.\d{1,2})?)/i);
+    const dollars = c.match(/(?:USD|US\s?\$|\$)\s*([\d,]+(?:\.\d{1,2})?)/i)
+      || c.match(/([\d,]+(?:\.\d{1,2})?)\s*(?:USD|US\s?\$)/i);
+    const bare = c.match(/([\d,]+\.\d{2})\b/);
+    if (!aed && !dollars && !bare) continue;
+    const usd = dollars ? Number(dollars[1].replace(/,/g, "")) : 0;
+    const amount = aed ? Number(aed[1].replace(/,/g, "")) : usd ? toAed(usd) : Number(bare[1].replace(/,/g, ""));
     if (!(amount > 0)) continue;
 
     // 12/08/2026, 12-08-26, or 12 Aug
@@ -393,7 +411,7 @@ export function parseAlerts(raw, config, today) {
     out.push({
       id: `${Date.now()}-${out.length}`,
       kind: credited ? "income" : "expense",
-      amount, date, note,
+      amount, date, note, ...(usd ? { usd } : {}),
       categoryId: credited ? "__income" : (guess ? guess.catId : "other"),
       src: !credited && isCard ? "card" : "bank",
       cardId: !credited && isCard ? cardId : "",
@@ -418,7 +436,7 @@ const OCR_LANG = "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.
 /* A balance or limit printed next to a transaction is not a transaction.
    Left in, "Avl bal AED 12,400.00" becomes a 12,400 row that looks real. */
 const BALANCE_PHRASE = /\b(?:(?:avl\.?|avail(?:able)?\.?|current|closing|outstanding|remaining)\s+)?(?:bal(?:ance)?\.?|limit|credit limit|min(?:imum)?\s+(?:amount\s+)?due)\s*(?:is|of|:)?\s*(?:AED|DHS?|د\.إ)?\s*[\d,]+(?:\.\d{1,2})?/gi;
-const AMOUNT_IN_LINE = /(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[\d,]*\d\.\d{2}(?![.\d\/])/i;
+const AMOUNT_IN_LINE = /(?:AED|DHS?|د\.إ|USD|US\s?\$|\$)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[\d,]*\d\.\d{2}(?![.\d\/])/i;
 /* A real month name, not any three letters: "212.30 Card" is not the 30th. */
 const HAS_DATE = /\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b|\b\d{1,2}[\s\-](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
 
@@ -494,7 +512,7 @@ export function splitPictureText(raw, today) {
    transaction rather than who it was with. Never a name. */
 const LABEL_LINE = /^(?:(?:pos|card|debit card|credit card|online|contactless|apple pay|google pay|samsung pay|atm|local|international)\s+)*(?:purchases?|payments?|transactions?|debit|credit|withdrawals?|refunds?|transfers?|incoming transfers?|outgoing transfers?|pending|completed|posted|declined|successful|processing|cash withdrawal)$/i;
 
-const AMOUNT_ANYWHERE = /[+\-−–]?\s*(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[+\-−–]?\s*[\d,]*\d\.\d{2}(?![.\d\/])\s*(?:AED|DHS?)?/gi;
+const AMOUNT_ANYWHERE = /[+\-−–]?\s*(?:AED|DHS?|د\.إ|USD|US\s?\$|\$)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[+\-−–]?\s*[\d,]*\d\.\d{2}(?![.\d\/])\s*(?:AED|DHS?|USD)?/gi;
 const DATE_ANYWHERE = /\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b|\b\d{1,2}[\s\-](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:[\s\-]\d{2,4})?\b|\b\d{1,2}:\d{2}(?:\s?[ap]m)?\b/gi;
 
 /* Who sent the notification, not who was paid. Wallet and bank notifications
@@ -905,6 +923,16 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.51.0", items: [
+    "Paid in dollars? Type “$45 lunch” or “45 usd lunch” and it's saved in dirhams at the fixed rate of 3.6725",
+    "The dollar price stays with the entry and shows next to it in History",
+    "Bank messages and screenshots in USD are converted the same way. When the bank also gives the dirham charge, that's the figure used",
+    "Your card may add a small fee for the exchange. Change the amount to match what was charged",
+  ]},
+  { v: "0.50.3", items: [
+    "Dragging the row of categories left and right scrolls the categories, instead of sliding the whole page to another tab",
+    "Same fix for the category filter in History",
+  ]},
   { v: "0.50.2", items: [
     "Screenshots of Wallet notifications now name the shop, not your bank",
     "“Sun 13:40” or “Fri 23:03” on a notification sets the day, instead of everything landing on today",
@@ -1921,7 +1949,7 @@ function Home(props) {
       id, kind: chosenKind, amount: guess.amount,
       categoryId: chosenKind === "income" ? "__income"
         : chosenKind === "cardpay" ? "__cardpay" : guess.catId,
-      note: guess.note, date: guess.date,
+      note: guess.note, date: guess.date, ...(guess.usd ? { usd: guess.usd } : {}),
       src: onCard ? "card" : "bank",
       ...(cardId && cardId !== "bank" ? { cardId } : {}),
       ...(chosenKind === "income" && incomeSrc !== "other" ? { sourceId: incomeSrc } : {}),
@@ -1948,7 +1976,8 @@ function Home(props) {
     await saveTx([...extra, entry, ...tx]);
 
     setToast({ prevTx, prevConfig: config, filed: describe(entry, config),
-      note: guess.fromPlan ? `No amount typed — used ${money(guess.amount)} from your plan` : null });
+      note: guess.fromPlan ? `No amount typed — used ${money(guess.amount)} from your plan`
+        : guess.usd ? `${usdLabel(guess.usd)} × ${USD_AED} = ${guess.amount.toFixed(2)} dirhams` : null });
     dismissToast();
 
     /* Repayment is a monthly action, so it doesn't stay selected — leaving it
@@ -2468,6 +2497,12 @@ function Home(props) {
                                 borderColor: r.amount > 0 && !r.doubt ? undefined : "var(--amber)" }} />
                           </span>
                         </div>
+                        {r.usd > 0 && (
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
+                            {usdLabel(r.usd)} × {USD_AED} in dirhams. If your card charged a
+                            little more for the exchange, change the amount to match.
+                          </div>
+                        )}
                         {r.doubt && (
                           <div style={{ fontSize: 11, color: "var(--amber)", marginTop: 3 }}>
                             No fils on this one, unlike the rest. Check the amount, then tick it.
@@ -2505,7 +2540,10 @@ function Home(props) {
 
                               {/* Every category, side by side — the guess is often
                                   close but not right, and fixing it later is a chore. */}
-                              <div className="catScroll">
+                              {/* Scrolls sideways under the finger. Without
+                                  data-owns-drag the tab swipe took the gesture
+                                  and the whole page slid to the next tab. */}
+                              <div className="catScroll" data-owns-drag>
                                 {config.categories.map((c) => (
                                   <button key={c.id} className="catPick"
                                     data-on={r.categoryId === c.id ? "1" : "0"}
@@ -2632,6 +2670,8 @@ function Home(props) {
                 Type it the way you'd say it — “45 groceries”. Pick the type above,
                 and which card if you used one. Works in English or Arabic.
                 The camera reads a screenshot of your bank messages or bank app.
+                Paid in dollars? Type “$45 lunch” or “45 usd lunch” and it's
+                converted at the fixed rate of {USD_AED}.
                 {!aiOn && " Add an API key in Plan for advice."}
               </Tip>
 
@@ -3043,7 +3083,7 @@ function History({ tx, config, saveTx, learn, cycle }) {
         )}
       </div>
 
-      <div className="catScroll" style={{ marginBottom: 12, paddingTop: 4 }}>
+      <div className="catScroll" data-owns-drag style={{ marginBottom: 12, paddingTop: 4 }}>
         {config.categories.map((c) => {
           const n = tx.filter((t) => t.categoryId === c.id).length;
           if (!n) return null;
@@ -3082,6 +3122,7 @@ function History({ tx, config, saveTx, learn, cycle }) {
               <div style={{ fontSize: 12, color: "var(--muted)" }}>
                 {fmtDay(t.date)} · {t.kind === "income" ? "Money in"
                   : t.kind === "cardpay" ? "Card repayment" : catOf(t.categoryId).name}
+                {t.usd > 0 && ` · ${usdLabel(t.usd)}`}
                 {share > 0.02 && ` · ${Math.round(share * 100)}% of the total`}
               </div>
             </div>
@@ -3148,6 +3189,7 @@ function History({ tx, config, saveTx, learn, cycle }) {
                       {t.kind === "income" ? "Money in"
                         : t.kind === "cardpay" ? "Card repayment"
                         : catOf(t.categoryId).name}
+                      {t.usd > 0 && ` · ${usdLabel(t.usd)}`}
                     </div>
                   </div>
                   <span className="num" style={{ fontSize: 15, fontWeight: 500,
