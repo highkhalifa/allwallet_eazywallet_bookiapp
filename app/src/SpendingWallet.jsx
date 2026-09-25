@@ -462,7 +462,7 @@ export function splitPictureText(raw, today) {
   const segs = [];
   let cur = [], head = "", curHead = "";
   const flush = () => {
-    if (cur.some((l) => AMOUNT_IN_LINE.test(l))) segs.push({ text: cur.join(" "), date: curHead });
+    if (cur.some((l) => AMOUNT_IN_LINE.test(l))) segs.push({ text: cur.join(" "), lines: cur, date: curHead });
     cur = [];
   };
   for (const line of fixOcr(raw).split(/\r?\n/)) {
@@ -470,12 +470,62 @@ export function splitPictureText(raw, today) {
     if (!t) { flush(); continue; }
     const d = dateLine(t, today);
     if (d) { flush(); head = d; continue; }
-    if (AMOUNT_IN_LINE.test(t) && cur.some((l) => AMOUNT_IN_LINE.test(l))) flush();
-    if (!cur.length) curHead = head;
+    let carry = [];
+    if (AMOUNT_IN_LINE.test(t) && cur.some((l) => AMOUNT_IN_LINE.test(l))) {
+      /* Name above amount: "Carrefour / -45.00 / Starbucks / -22.50". The line
+         after an amount is then the next row's name, not this one's — but only
+         when this row already has a name and the new amount line has none,
+         or a message with the name below its amount would lose it. */
+      const last = cur.map((l) => AMOUNT_IN_LINE.test(l)).lastIndexOf(true);
+      if (!lineName(t) && cur.slice(0, last + 1).some((l) => lineName(l))) carry = cur.splice(last + 1);
+      flush();
+    }
+    if (!cur.length) { curHead = head; cur = carry; }
     cur.push(t);
   }
   flush();
   return segs;
+}
+
+/* Words a bank app prints under or beside the name, describing the kind of
+   transaction rather than who it was with. Never a name. */
+const LABEL_LINE = /^(?:(?:pos|card|debit card|credit card|online|contactless|apple pay|google pay|samsung pay|atm|local|international)\s+)*(?:purchases?|payments?|transactions?|debit|credit|withdrawals?|refunds?|transfers?|incoming transfers?|outgoing transfers?|pending|completed|posted|declined|successful|processing|cash withdrawal)$/i;
+
+const AMOUNT_ANYWHERE = /[+\-−–]?\s*(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[+\-−–]?\s*[\d,]*\d\.\d{2}(?![.\d\/])\s*(?:AED|DHS?)?/gi;
+const DATE_ANYWHERE = /\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b|\b\d{1,2}[\s\-](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:[\s\-]\d{2,4})?\b|\b\d{1,2}:\d{2}(?:\s?[ap]m)?\b/gi;
+
+/* Who the money went to or came from. Messages say it in a sentence — "at
+   Carrefour", "for Talabat" — and bank apps put it on its own line in normal
+   case. The pasted-message reader only knew names in capitals, so on a
+   picture almost every row came out as "Bank alert". */
+function pictureName(seg) {
+  const said = seg.text.match(/\b(?:at|to|for|from)\s+([A-Z][A-Za-z0-9&'.\- ]{2,44})/);
+  if (said && !/^(?:AED|DHS?)\b/.test(said[1])) {
+    const n = said[1]
+      .replace(/\s+\b(on|using|from|with|via|at|for|to|your|dated|ref|through|card|account|is|was|has)\b.*$/i, "")
+      .replace(/[\s.,;:-]+$/, "").trim();
+    if (n.length >= 3) return n;
+  }
+  /* In a message, a short line is a scrap of the sentence wrapped onto its
+     own line — "credited to account ending 3391 on" — not a name. */
+  const message = seg.lines.some((l) => l.split(" ").length > 6)
+    || /\b(your|account|ending|has been|credited|debited|spent)\b/i.test(seg.text);
+  if (message) return "";
+  for (const line of seg.lines) {
+    const n = lineName(line);
+    if (n) return n;
+  }
+  return "";
+}
+
+/* A line that could be a name: what's left once amounts, dates and times are
+   taken out, if it has letters and isn't a label like "Card purchase". A
+   sentence is a message, not a name, and is read by pictureName instead. */
+function lineName(line) {
+  if (line.split(" ").length > 6) return "";
+  const n = line.replace(AMOUNT_ANYWHERE, " ").replace(DATE_ANYWHERE, " ")
+    .replace(/\s+/g, " ").replace(/^[\s+\-−–.,;:|]+|[\s+\-−–.,;:|]+$/g, "").trim();
+  return (n.match(/[A-Za-z؀-ۿ]/g) || []).length >= 3 && !LABEL_LINE.test(n) ? n : "";
 }
 
 export function parsePicture(raw, config, today) {
@@ -495,12 +545,15 @@ export function parsePicture(raw, config, today) {
       Object.assign(row, { kind: "expense",
         categoryId: localParse(`${row.amount} ${row.note}`, config, row.date)?.catId || "other" });
     }
-    /* On a bank app screen the amount sits on the same line as the shop, and
-       the name reader takes it along: "CARREFOUR - AED 212.30". */
-    const note = row.note
-      .replace(/[+\-−–]?\s*(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?/gi, "")
-      .replace(/[\s+\-−–.,;:]+$/, "").trim();
-    out.push({ ...row, note: note.length >= 3 ? note : row.note, id: `${Date.now()}-p${out.length}` });
+    const name = pictureName(seg).slice(0, 40);
+    if (name) {
+      row.note = name;
+      // the category was guessed from "Bank alert"; guess again from the real name
+      if (row.kind === "expense") {
+        row.categoryId = localParse(`${row.amount} ${name}`, config, row.date)?.catId || row.categoryId;
+      }
+    }
+    out.push({ ...row, id: `${Date.now()}-p${out.length}` });
   }
   return out;
 }
@@ -759,6 +812,11 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.50.1", items: [
+    "Entries from a picture now get the shop's name instead of “Bank alert”. Names written in normal letters, like “Carrefour Hypermarket”, weren't recognised before",
+    "Works whether the name sits above, beside or below the amount, and for messages that say “for Talabat”",
+    "The category is guessed from that name, so Carrefour goes to Food rather than Other",
+  ]},
   { v: "0.50.0", items: [
     "Add transactions from a picture: tap the camera next to the typing box and pick a screenshot of your bank messages or your bank app",
     "The picture is read on your phone and isn't sent anywhere. The first time needs internet to fetch the reader",

@@ -121,6 +121,18 @@ const bankApp = await shot(`<div style="padding:20px 0">
   ${rowHtml("LULU HYPERMARKET", "Card purchase", "- AED 64.75")}
 </div>`, "bank-app.png");
 
+/* Names in normal case, above their amounts, as most bank apps show them.
+   0.50.0 named every one of these "Bank alert". */
+const nameRow = (name, sub, amt) => `<div style="padding:12px 18px;border-bottom:1px solid #eee">
+  <div style="display:flex;justify-content:space-between"><span style="font-weight:600">${name}</span>
+  <span style="font-weight:600">${amt}</span></div><div style="color:#666;font-size:14px">${sub}</div></div>`;
+const bankAppTitle = await shot(`<div style="padding:20px 0">
+  <div style="padding:6px 18px;color:#555;font-size:15px">Today</div>
+  ${nameRow("Carrefour Hypermarket", "POS Purchase", "-45.00 AED")}
+  ${nameRow("Starbucks Dubai Mall", "Card purchase", "-22.50 AED")}
+  ${nameRow("Talabat", "Online purchase", "-68.25 AED")}
+</div>`, "bank-app-title.png");
+
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
@@ -159,6 +171,7 @@ console.log("\nREADING A PICTURE");
   ok("bank messages: amounts exact", JSON.stringify(rows.map((r) => r.amount)) === "[137.55,408.45,9500]");
   ok("bank messages: balances are not entries", !rows.some((r) => r.amount === 12400 || r.amount === 18412.45));
   ok("bank messages: salary is money in", rows[2]?.kind === "money in");
+  ok("bank messages: no scrap of sentence as a name", !/account|ending/.test(rows[2]?.note || ""), rows[2]?.note);
   ok("bank messages: merchant read", rows[0]?.note === "AZAYAM RESTAURANT", rows[0]?.note);
   ok("bank messages: date read", rows[0]?.date === "25 Aug", rows[0]?.date);
 }
@@ -177,6 +190,13 @@ console.log("\nREADING A PICTURE");
   ok("bank app list: day heading carried down", rows[1]?.date === "30 Aug" && rows[3]?.date === "28 Aug",
     rows.map((r) => r.date).join());
   ok("bank app list: shop kept with its amount", rows[0]?.note === "CARREFOUR MARINA", rows[0]?.note);
+}
+{
+  const { rows, msg } = await read(bankAppTitle);
+  console.log(`         read: ${show(rows) || msg}`);
+  ok("names in normal case: amounts exact", JSON.stringify(rows.map((r) => r.amount)) === "[45,22.5,68.25]");
+  ok("names in normal case: each row named", rows.map((r) => r.note).join(" | ")
+    === "Carrefour Hypermarket | Starbucks Dubai Mall | Talabat", rows.map((r) => r.note).join(" | "));
 }
 {
   const pinned = (u) => CDN[u] || /tesseract\.js-core@v7\.0\.0\//.test(u);

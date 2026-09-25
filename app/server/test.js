@@ -143,6 +143,7 @@ console.log("\nREADING TEXT FROM A PICTURE");
   ok("messages with no gap between them still split", m.length === 3, `${m.length} rows`);
   ok("balances and limits are not entries", m.map((r) => r.amount).join() === "137.55,408.45,9500",
     m.map((r) => r.amount).join());
+  ok("a wrapped line of a message isn't taken for a name", m[2]?.note === "Money in" || m[2]?.note === "Salary", m[2]?.note);
   ok("wording still decides direction", m.map((r) => r.kind).join() === "expense,expense,income");
 
   const bankApp = "30 Aug 2026\n\nCARREFOUR MARINA - AED 212.30\nCard purchase\n\nADNOC STATION 112 - AED 95.00\nCard purchase\n\n28 Aug 2026\n\nTRANSFER FROM AHMED + AED 3,538.50\nIncoming transfer\n\nLULU HYPERMARKET - AED 64.75\nCard purchase\n";
@@ -152,6 +153,18 @@ console.log("\nREADING TEXT FROM A PICTURE");
   ok("a + sign is money in", b[2]?.kind === "income" && b[2]?.categoryId === "__income");
   ok("a - sign is money out", b[0]?.kind === "expense");
   ok("the amount isn't left in the shop name", b[0]?.note === "CARREFOUR MARINA", b[0]?.note);
+
+  /* Bank apps write names in normal case, which the message reader never
+     recognised: every one of these came out as "Bank alert" in 0.50.0. */
+  const names = (t) => parsePicture(t, config, "2026-09-02").map((r) => r.note).join(" | ");
+  ok("name above its amount", names("Carrefour Hypermarket\nPOS Purchase\n-45.00 AED\nStarbucks Dubai Mall\n-22.50 AED")
+    === "Carrefour Hypermarket | Starbucks Dubai Mall", names("Carrefour Hypermarket\nPOS Purchase\n-45.00 AED\nStarbucks Dubai Mall\n-22.50 AED"));
+  ok("name beside its amount", names("Carrefour Hypermarket -AED 45.00\nStarbucks Coffee -AED 22.50")
+    === "Carrefour Hypermarket | Starbucks Coffee");
+  ok("name below its amount", names("AED 45.00\nCarrefour Hypermarket\nAED 22.50\nTalabat")
+    === "Carrefour Hypermarket | Talabat");
+  ok("a name after \"for\" in a message", names("Your card ending 1234 was debited AED 45.00 for Talabat on 25/08/2026") === "Talabat");
+  ok("the category is guessed from the name", parsePicture("Carrefour Hypermarket\n-45.00 AED", config, "2026-09-02")[0]?.categoryId === "groceries");
 
   const slips = parsePicture("AED 1O5.5O spent at NOON on 03/09/2026", config, "2026-09-05");
   ok("O read for 0 inside a figure is fixed", slips[0]?.amount === 105.5, String(slips[0]?.amount));
