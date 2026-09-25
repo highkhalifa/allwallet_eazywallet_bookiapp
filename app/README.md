@@ -157,8 +157,11 @@ verified.** A build succeeding is not a test result.
   optional API key (MiniMax, OpenAI, Anthropic and others) for categorising
   entries and reading screenshots. The failure has never been diagnosed because
   the error text under the input box has never been captured. Start there.
-- **The screenshot scanner** is referenced in the UI but was not rebuilt after
-  the source was lost. The clipboard paste path works and is the better route.
+- **Reading pictures** (the camera button, 0.50.0) runs Tesseract on the phone,
+  loaded from jsdelivr at pinned versions on first use. It reads bank messages
+  and bank-app lists well in tests; odd layouts may pair a shop with the wrong
+  amount, which is why every row goes through review. `server/test-picture.js`
+  reads real screenshots through the app and needs Playwright's Chromium.
 - **"The year ahead"** — seasonal planning for National Day, Ramadan, summer —
   existed in an earlier version and was not rebuilt.
 - **Category structure.** The user's categories mix "what did I buy" with "who

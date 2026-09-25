@@ -31,7 +31,7 @@ const bundle = esbuild.buildSync({
 }).outputFiles[0].text;
 
 const mod = await import("data:text/javascript;base64," + Buffer.from(bundle).toString("base64"));
-const { localParse, computeMetrics, splitPlan, parseAlerts } = mod;
+const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture } = mod;
 
 const config = {
   cycleStartDay: 27,
@@ -132,6 +132,33 @@ console.log("\nREADING PASTED BANK ALERTS");
   ok("merchant read without the sentence around it", r?.note === "AZAYAM RESTAURANT", r?.note);
   ok("date read from the message", r?.date === "2026-08-25", r?.date);
   ok("attached to a card", r?.src === "card" && !!r?.cardId);
+}
+
+console.log("\nREADING TEXT FROM A PICTURE");
+/* What the text reader actually returned for screenshots, copied from a real
+   run. server/test-picture.js reads the pictures themselves. */
+{
+  const messages = "AED 137.55 has been spent on your\nADIB Credit Card ending 4412 at\nAZAYAM RESTAURANT on\n25/08/2026. Avl limit AED 18,412.45\nAED 408.45 paid to ETISALAT\nINTERNET on 29/08/2026 from\naccount ending 3391. Available\nbalance is AED 12,400.00\n\nYour salary of AED 9,500.00 has been\ncredited to account ending 3391 on\n01/09/2026.\n";
+  const m = parsePicture(messages, config, "2026-09-02");
+  ok("messages with no gap between them still split", m.length === 3, `${m.length} rows`);
+  ok("balances and limits are not entries", m.map((r) => r.amount).join() === "137.55,408.45,9500",
+    m.map((r) => r.amount).join());
+  ok("wording still decides direction", m.map((r) => r.kind).join() === "expense,expense,income");
+
+  const bankApp = "30 Aug 2026\n\nCARREFOUR MARINA - AED 212.30\nCard purchase\n\nADNOC STATION 112 - AED 95.00\nCard purchase\n\n28 Aug 2026\n\nTRANSFER FROM AHMED + AED 3,538.50\nIncoming transfer\n\nLULU HYPERMARKET - AED 64.75\nCard purchase\n";
+  const b = parsePicture(bankApp, config, "2026-09-02");
+  ok("a day heading dates the rows under it", b.map((r) => r.date).join() ===
+    "2026-08-30,2026-08-30,2026-08-28,2026-08-28", b.map((r) => r.date).join());
+  ok("a + sign is money in", b[2]?.kind === "income" && b[2]?.categoryId === "__income");
+  ok("a - sign is money out", b[0]?.kind === "expense");
+  ok("the amount isn't left in the shop name", b[0]?.note === "CARREFOUR MARINA", b[0]?.note);
+
+  const slips = parsePicture("AED 1O5.5O spent at NOON on 03/09/2026", config, "2026-09-05");
+  ok("O read for 0 inside a figure is fixed", slips[0]?.amount === 105.5, String(slips[0]?.amount));
+  const dotted = parsePicture("AED 45.00 spent at LULU\non 03.09.2026", config, "2026-09-05");
+  ok("a dotted date is not a second amount", dotted.length === 1, `${dotted.length} rows`);
+  const jan = parsePicture("Dec 30\nNOON - AED 20.00", config, "2027-01-04");
+  ok("a heading with no year in January is last December", jan[0]?.date === "2026-12-30", jan[0]?.date);
 }
 
 console.log("\nDOES IT ACTUALLY RUN");
