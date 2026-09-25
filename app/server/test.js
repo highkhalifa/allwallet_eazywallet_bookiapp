@@ -1,0 +1,180 @@
+/* Run with: npm test
+
+   These are not exhaustive unit tests. Each one exists because the thing it
+   checks actually broke at some point and reached the user's phone. Keep them
+   passing and the same mistakes can't ship twice.
+
+   The mount test matters most: it is the only one that executes the app, and
+   it catches the "Cannot access X before initialization" class of crash that
+   a successful build will happily hide. */
+
+import { JSDOM } from "jsdom";
+import esbuild from "esbuild";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.join(here, "..");
+
+let failures = 0;
+const ok = (name, cond, detail = "") => {
+  if (!cond) failures++;
+  console.log(`${cond ? "  ok   " : "  FAIL "}${name}${detail ? "  " + detail : ""}`);
+};
+
+/* Load the app's pure functions without a DOM. */
+const bundle = esbuild.buildSync({
+  entryPoints: [path.join(root, "src/SpendingWallet.jsx")],
+  bundle: true, format: "esm", write: false, platform: "node",
+  define: { __APP_VERSION__: '"test"', __BUILD_TIME__: '"test"' },
+  loader: { ".jsx": "jsx" },
+}).outputFiles[0].text;
+
+const mod = await import("data:text/javascript;base64," + Buffer.from(bundle).toString("base64"));
+const { localParse, computeMetrics, splitPlan, parseAlerts } = mod;
+
+const config = {
+  cycleStartDay: 27,
+  categories: [
+    { id: "living", name: "Housing", budget: 1000, color: "#4E8FB0" },
+    { id: "family", name: "Family", budget: 3300, color: "#C07AA0" },
+    { id: "groceries", name: "Food", budget: 1900, color: "#6FAE72" },
+    { id: "fun", name: "Personal", budget: 3200, color: "#D9A441" },
+    { id: "kid", name: "Kid investment", budget: 600, color: "#C9825A" },
+    { id: "other", name: "Other", budget: 0, color: "#B5876B" },
+  ],
+  cards: [{ id: "adib", name: "ADIB", limit: 20000, color: "#4E8FB0" },
+          { id: "tabby", name: "Tabby", limit: 15000, color: "#6FAE72" }],
+  incomes: [{ id: "i1", name: "Salary", amount: 15000, day: 27 }],
+  learned: { barber: "fun" },
+};
+const cycle = { start: "2026-08-27", end: "2026-09-26", days: 31 };
+
+console.log("\nREADING WHAT YOU TYPED");
+ok("a category name wins", localParse("600 kid investment", config, "2026-09-02")?.catId === "kid");
+ok("part of a name is enough", localParse("600 kid", config, "2026-09-02")?.catId === "kid");
+ok("a taught word is used", localParse("60 barber", config, "2026-09-02")?.catId === "fun");
+ok("the built-in list still works", localParse("45 carrefour", config, "2026-09-02")?.catId === "groceries");
+ok("a question is not an entry", localParse("can i afford dinner", config, "2026-09-02") === null);
+ok("income with no amount uses the plan",
+  localParse("salary came in", config, "2026-09-02")?.amount === 15000);
+{
+  const r = localParse("10000 paid to cover card", config, "2026-09-02");
+  // a repayment that is also "on the card" would inflate the balance it pays
+  ok("a repayment is never card spending", r?.isCardPay === true && r?.src === "bank");
+}
+
+console.log("\nSPLITTING AN INSTALMENT");
+for (const [total, n] of [[6000, 3], [1397, 3], [100, 3], [3000, 4]]) {
+  const { first, slice } = splitPlan(total, n);
+  const sum = Math.round((first + slice * (n - 1)) * 100) / 100;
+  ok(`${total} over ${n} sums back exactly`, sum === total, `${first} + ${slice}×${n - 1}`);
+}
+
+console.log("\nWHAT THE NUMBERS MEAN");
+{
+  const tx = [
+    { id: "1", kind: "income", amount: 15000, date: "2026-08-27", note: "Salary", sourceId: "i1" },
+    { id: "2", kind: "income", amount: 10000, date: "2026-08-30", note: "friend repaid a loan" },
+    { id: "3", kind: "expense", amount: 45, categoryId: "groceries", src: "bank", date: "2026-08-28" },
+    { id: "4", kind: "expense", amount: 1397, categoryId: "fun", src: "card", cardId: "tabby", date: "2026-08-28" },
+    { id: "5", kind: "cardpay", amount: 1000, cardId: "tabby", date: "2026-08-30" },
+  ];
+  const m = computeMetrics({ tx, config, cycle, today: "2026-09-02", past: false, future: false });
+  ok("unplanned money is kept separate", m.plannedIncome === 15000 && m.otherIncome === 10000);
+  ok("a card purchase doesn't leave the bank", m.cashOut === 45 + 1000);
+  ok("a repayment reduces the balance", m.cardBalance === 397);
+  ok("only budgeted categories count against the budget", m.budgetedSpent === 45 + 1397);
+  ok("the daily figure divides available cash",
+    Math.abs(m.perDay * m.daysLeft - Math.max(0, m.left)) < 0.5);
+}
+
+console.log("\nINSTALMENTS ACROSS CYCLES");
+{
+  // a credit-card plan: nothing is due in the month you buy it
+  const tx = [{ id: "buy", kind: "expense", amount: 6000, date: "2026-08-28",
+    categoryId: "kid", src: "card", cardId: "adib", note: "university fees",
+    plan: { id: "buy", total: 3, slice: 2000, first: 2000, cardId: "adib",
+            note: "university fees", startsNow: false } }];
+  const cycles = [["2026-08-27", "2026-09-26", 31], ["2026-09-27", "2026-10-26", 30],
+                  ["2026-10-27", "2026-11-26", 31], ["2026-11-27", "2026-12-26", 30],
+                  ["2026-12-27", "2027-01-26", 31]];
+  const charged = cycles.map(([start, end, days]) =>
+    computeMetrics({ tx, config, cycle: { start, end, days }, today: start,
+      past: false, future: false }).spent);
+  ok("nothing charged in the month of purchase", charged[0] === 0);
+  ok("charged once per cycle after that", charged[1] === 2000 && charged[2] === 2000 && charged[3] === 2000);
+  ok("stops when the plan ends", charged[4] === 0);
+  ok("totals exactly the purchase price",
+    charged.reduce((s, v) => s + v, 0) === 6000, charged.join(" + "));
+  const m0 = computeMetrics({ tx, config, cycle, today: "2026-09-02", past: false, future: false });
+  ok("the whole amount is owed from day one", m0.cardBalance === 6000);
+  ok("and shown as promised", m0.committed === 6000);
+}
+
+console.log("\nREADING PASTED BANK ALERTS");
+{
+  const incoming = [
+    "Your salary of AED 9,500.00 has been credited to account ending 3391 on 01/09/2026.",
+    "AED 6,100.00 deposited to your account ending 3391.",
+    "AED 3,538.50 received from AHMED TENANT on 30/08/2026.",
+    "Inward remittance of AED 1,200.00 credited on 02/09/2026.",
+  ];
+  const outgoing = [
+    "AED 137.55 has been spent on your ADIB Credit Card ending 4412 at AZAYAM RESTAURANT on 25/08/2026.",
+    "AED 408.45 paid to ETISALAT INTERNET on 29/08/2026 from account ending 3391.",
+  ];
+  incoming.forEach((t, i) =>
+    ok(`money in #${i + 1}`, parseAlerts(t, config, "2026-09-02")[0]?.kind === "income"));
+  outgoing.forEach((t, i) =>
+    ok(`money out #${i + 1}`, parseAlerts(t, config, "2026-09-02")[0]?.kind === "expense"));
+  const r = parseAlerts(outgoing[0], config, "2026-09-02")[0];
+  ok("merchant read without the sentence around it", r?.note === "AZAYAM RESTAURANT", r?.note);
+  ok("date read from the message", r?.date === "2026-08-25", r?.date);
+  ok("attached to a card", r?.src === "card" && !!r?.cardId);
+}
+
+console.log("\nDOES IT ACTUALLY RUN");
+/* The one test that executes the app. A build succeeding proves only that the
+   syntax is valid — a hook reading state declared below it compiles fine and
+   then throws on mount. That shipped in 0.38.0. */
+{
+  const app = esbuild.buildSync({
+    entryPoints: [path.join(root, "src/main.jsx")],
+    bundle: true, format: "iife", write: false,
+    define: { __APP_VERSION__: '"test"', __BUILD_TIME__: '"test"',
+              "process.env.NODE_ENV": '"production"' },
+    loader: { ".jsx": "jsx" },
+  }).outputFiles[0].text;
+
+  const errs = [];
+  const dom = new JSDOM(`<!doctype html><html><body><div id="root"></div></body></html>`,
+    { runScripts: "outside-only", pretendToBeVisual: true, url: "https://example.com/" });
+  const w = dom.window;
+  w.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {},
+    addListener() {}, removeListener() {} });
+  w.scrollTo = () => {};
+  w.addEventListener("error", (e) => errs.push(e.message));
+
+  // data written the way the app on the phone writes it, prefix and all
+  w.localStorage.setItem("wallet:wallet-transactions", JSON.stringify([
+    { id: "a", kind: "income", amount: 15000, date: "2026-08-27", note: "Salary", sourceId: "i1" },
+    { id: "b", kind: "expense", amount: 45, date: "2026-08-28", note: "carrefour",
+      categoryId: "groceries", src: "bank" },
+  ]));
+  w.localStorage.setItem("wallet:wallet-config", JSON.stringify(config));
+
+  try { w.eval(app); } catch (e) { errs.push(e.message); }
+
+  await new Promise((r) => setTimeout(r, 900));
+  const root_ = w.document.getElementById("root");
+  const text = (root_?.textContent || "").replace(/@import[^}]*}/g, "");
+  ok("the app mounts", (root_?.children.length || 0) > 0);
+  ok("nothing thrown", errs.length === 0, errs[0] || "");
+  ok("existing data is found", text.includes("15,000") || text.includes("Food"));
+  ok("doesn't ask for the pay date again", !text.includes("What day of the month"));
+  dom.window.close();
+}
+
+console.log(failures ? `\n${failures} FAILING\n` : "\nall pass\n");
+process.exit(failures ? 1 : 0);

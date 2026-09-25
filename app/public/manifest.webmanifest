@@ -1,0 +1,9 @@
+{
+  "name": "Wallet",
+  "short_name": "Wallet",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F2F0EA",
+  "theme_color": "#F2F0EA",
+  "icons": []
+}
