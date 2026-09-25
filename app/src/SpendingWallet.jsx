@@ -403,6 +403,182 @@ export function parseAlerts(raw, config, today) {
   return out;
 }
 
+/* ---------- reading a picture of transactions ---------- */
+
+/* A picture is read on the phone. The text reader (Tesseract) downloads from
+   a CDN the first time it's used and the picture itself never leaves the
+   device — a screenshot of a bank app is as private as the app is. Its output
+   is plain text, which then goes through the same reader as pasted messages,
+   so both routes file things the same way.
+
+   Pinned, so the reader that was tested is the reader that runs. */
+const OCR_SRC = "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js";
+const OCR_LANG = "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int";
+
+/* A balance or limit printed next to a transaction is not a transaction.
+   Left in, "Avl bal AED 12,400.00" becomes a 12,400 row that looks real. */
+const BALANCE_PHRASE = /\b(?:(?:avl\.?|avail(?:able)?\.?|current|closing|outstanding|remaining)\s+)?(?:bal(?:ance)?\.?|limit|credit limit|min(?:imum)?\s+(?:amount\s+)?due)\s*(?:is|of|:)?\s*(?:AED|DHS?|د\.إ)?\s*[\d,]+(?:\.\d{1,2})?/gi;
+const AMOUNT_IN_LINE = /(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?|[\d,]*\d\.\d{2}(?![.\d\/])/i;
+/* A real month name, not any three letters: "212.30 Card" is not the 30th. */
+const HAS_DATE = /\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b|\b\d{1,2}[\s\-](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
+
+/* The reader's usual slips in figures: O for 0, l or I for 1, and AED misread
+   as AEO or A£D. Only fixed next to digits, so words are left alone. */
+function fixOcr(raw) {
+  let t = String(raw).replace(/\bA[E£]\s?[DO0]\b/g, "AED");
+  for (let i = 0; i < 2; i++) {
+    t = t.replace(/(\d)[Oo](?=[\d.,])/g, "$10").replace(/([\d.,])[Oo](?=\d)/g, "$10")
+         .replace(/(\d)[lI|](?=[\d.,])/g, "$11").replace(/([\d.,])[lI|](?=\d)/g, "$11");
+  }
+  return t.replace(BALANCE_PHRASE, " ");
+}
+
+const toDMY = (iso) => { const [y, m, d] = iso.split("-"); return `${d}/${m}/${y}`; };
+
+/* Bank apps print the day once, above its transactions. Carried down to
+   each row under it, or every one of them would land on today. */
+function dateLine(line, today) {
+  const t = line.trim().replace(/^(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s+/i, "");
+  if (/^today$/i.test(t)) return toDMY(today);
+  if (/^yesterday$/i.test(t)) return toDMY(addDays(today, -1));
+  if (/^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$/.test(t)) return t;
+  let d, mon, y;
+  let m = t.match(/^(\d{1,2})\s+([A-Za-z]{3,9})\.?,?(?:\s+(\d{4}))?$/);
+  if (m) [, d, mon, y] = m;
+  else if ((m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?(?:\s+(\d{4}))?$/))) [, mon, d, y] = m;
+  else return null;
+  const mo = SMS_MONTHS[mon.slice(0, 3).toLowerCase()];
+  if (!mo || Number(d) < 1 || Number(d) > 31) return null;
+  let iso = `${y || today.slice(0, 4)}-${pad(mo)}-${pad(Number(d))}`;
+  // no year printed and it would be in the future: it's last December, not next
+  if (!y && iso > today) iso = `${Number(today.slice(0, 4)) - 1}${iso.slice(4)}`;
+  return toDMY(iso);
+}
+
+/* Screen text arrives as lines with no idea which belong together. A new
+   transaction starts at a blank line, a date heading, or a second amount —
+   one row holds one amount, so two amounts can't be one purchase. */
+export function splitPictureText(raw, today) {
+  const segs = [];
+  let cur = [], head = "", curHead = "";
+  const flush = () => {
+    if (cur.some((l) => AMOUNT_IN_LINE.test(l))) segs.push({ text: cur.join(" "), date: curHead });
+    cur = [];
+  };
+  for (const line of fixOcr(raw).split(/\r?\n/)) {
+    const t = line.replace(/\s+/g, " ").trim();
+    if (!t) { flush(); continue; }
+    const d = dateLine(t, today);
+    if (d) { flush(); head = d; continue; }
+    if (AMOUNT_IN_LINE.test(t) && cur.some((l) => AMOUNT_IN_LINE.test(l))) flush();
+    if (!cur.length) curHead = head;
+    cur.push(t);
+  }
+  flush();
+  return segs;
+}
+
+export function parsePicture(raw, config, today) {
+  const out = [];
+  for (const seg of splitPictureText(raw, today)) {
+    const text = seg.date && !HAS_DATE.test(seg.text) ? `${seg.date} ${seg.text}` : seg.text;
+    const [row] = parseAlerts(text, config, today);
+    if (!row) continue;
+
+    /* Bank apps mark direction with a sign rather than a word. The sign is
+       the bank's own statement of it, so it beats reading the wording. */
+    const sign = (text.match(/([+\-−–])\s*(?:AED|DHS?|د\.إ)?\s*[\d,]*\d\.\d{2}(?![.\d\/])/i)
+      || text.match(/(?:AED|DHS?|د\.إ)\s*([+\-−–])\s*\d/i) || [])[1];
+    if (sign === "+" && row.kind !== "income") {
+      Object.assign(row, { kind: "income", categoryId: "__income", src: "bank", cardId: "" });
+    } else if (sign && sign !== "+" && row.kind === "income") {
+      Object.assign(row, { kind: "expense",
+        categoryId: localParse(`${row.amount} ${row.note}`, config, row.date)?.catId || "other" });
+    }
+    /* On a bank app screen the amount sits on the same line as the shop, and
+       the name reader takes it along: "CARREFOUR - AED 212.30". */
+    const note = row.note
+      .replace(/[+\-−–]?\s*(?:AED|DHS?|د\.إ)\s*[+\-−–]?\s*[\d,]*\d(?:\.\d{1,2})?/gi, "")
+      .replace(/[\s+\-−–.,;:]+$/, "").trim();
+    out.push({ ...row, note: note.length >= 3 ? note : row.note, id: `${Date.now()}-p${out.length}` });
+  }
+  return out;
+}
+
+let ocrLoading = null;
+function loadOcr() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (!ocrLoading) {
+    ocrLoading = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = OCR_SRC;
+      s.async = true;
+      s.onload = () => (window.Tesseract ? resolve(window.Tesseract) : reject(new Error("reader missing")));
+      // forget the failure, so the next try after reconnecting starts afresh
+      s.onerror = () => { ocrLoading = null; s.remove(); reject(new Error("reader unavailable")); };
+      document.head.appendChild(s);
+    });
+  }
+  return ocrLoading;
+}
+
+/* Grey, the right way up for the reader, and not so large that an iPhone runs
+   out of canvas. Dark-mode screenshots are inverted: the reader was trained
+   on dark text on light paper and misses a lot of light-on-dark. */
+async function preparePicture(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error("not a picture"));
+      i.src = url;
+    });
+    const w0 = img.naturalWidth, h0 = img.naturalHeight;
+    if (!w0 || !h0) throw new Error("not a picture");
+    let scale = Math.min(1, Math.sqrt(8e6 / (w0 * h0)), 2400 / w0);
+    if (w0 < 900) scale = Math.min(2, 1200 / w0);   // small text reads better enlarged
+    const w = Math.round(w0 * scale), h = Math.round(h0 * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const g = canvas.getContext("2d", { willReadFrequently: true });
+    g.drawImage(img, 0, 0, w, h);
+    const px = g.getImageData(0, 0, w, h);
+    const d = px.data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      d[i] = d[i + 1] = d[i + 2] = y;
+      sum += y;
+    }
+    if (sum / (d.length / 4) < 110) {
+      for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = 255 - d[i];
+    }
+    g.putImageData(px, 0, 0);
+    return canvas;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+export async function readPicture(file, onProgress) {
+  const T = await loadOcr();
+  const worker = await T.createWorker("eng", 1, {
+    langPath: OCR_LANG,
+    logger: (m) => { if (m.status === "recognizing text" && onProgress) onProgress(m.progress); },
+  });
+  try {
+    /* Read row by row, left to right. Left to itself the reader treats a
+       column of amounts as its own block, and every amount comes out
+       separated from the shop it belongs to. */
+    await worker.setParameters({ tessedit_pageseg_mode: "6" });
+    const { data } = await worker.recognize(await preparePicture(file));
+    return data.text || "";
+  } finally {
+    worker.terminate();
+  }
+}
+
 /* Plainly: what did that become? Shown right after logging so a wrong guess
    is caught in the moment, not weeks later in a reconciliation. */
 export function describe(entry, config) {
@@ -583,6 +759,12 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.50.0", items: [
+    "Add transactions from a picture: tap the camera next to the typing box and pick a screenshot of your bank messages or your bank app",
+    "The picture is read on your phone and isn't sent anywhere. The first time needs internet to fetch the reader",
+    "Everything it finds is listed for you to check first. Amounts and names can be corrected before you add them",
+    "Balances and limits in a message are left out, and a + or − next to an amount decides money in or out",
+  ]},
   { v: "0.44.0", items: [
     "Naming a category now sends the entry there — “600 kid investment” was landing in Other despite a Kid investment category existing",
     "Part of a name works too, so “600 kid” finds it",
@@ -925,6 +1107,9 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
 .reviewList{max-height:340px;overflow-y:auto;overscroll-behavior:contain;}
 .reviewRow{display:flex;align-items:flex-start;gap:9px;padding:10px 12px 10px 13px;
   border-bottom:1px solid var(--line);}
+.reviewEdit{font:inherit;background:none;border:none;border-bottom:1px dashed var(--line);
+  color:inherit;padding:0 0 1px;outline:none;border-radius:0;}
+.reviewEdit:focus{border-bottom:1px solid var(--gold);}
 .tickBox{width:19px;height:19px;border-radius:6px;display:flex;align-items:center;
   justify-content:center;border:1.5px solid var(--line);color:var(--leather);}
 .tickBox[data-on="1"]{border-color:var(--leaf);background:var(--leaf);}
@@ -1392,6 +1577,45 @@ function Home(props) {
       setPasteMsg("Couldn't find any amounts in that. Paste the message text itself.");
       return;
     }
+    setPicUrl("");
+    setRows(found);
+  };
+
+  /* A picture goes through the same review as pasted messages: reading
+     pixels gets a figure wrong now and then, so nothing saves until each
+     row has been looked at. */
+  const [reading, setReading] = useState(null);   // { n, of, pct } while a picture is read
+  const [picUrl, setPicUrl] = useState("");
+  const [picOpen, setPicOpen] = useState(false);
+  const picInput = useRef(null);
+
+  const readPictures = async (files) => {
+    const list = Array.from(files || []).filter((f) => /^image\//.test(f.type) || !f.type);
+    if (!list.length) return;
+    setPasteMsg("");
+    setRows(null);
+    const found = [];
+    try {
+      for (let n = 0; n < list.length; n++) {
+        setReading({ n: n + 1, of: list.length, pct: 0 });
+        const text = await readPicture(list[n], (p) =>
+          setReading({ n: n + 1, of: list.length, pct: Math.round(p * 100) }));
+        found.push(...parsePicture(text, config, cycleToday));
+      }
+    } catch (e) {
+      setReading(null);
+      setPasteMsg(/not a picture/.test(e.message)
+        ? "That file couldn't be opened as a picture. Try a screenshot instead."
+        : "Couldn't load the text reader. It needs internet the first time it's used.");
+      return;
+    }
+    setReading(null);
+    if (!found.length) {
+      setPasteMsg("Couldn't find any amounts in that picture. A clear screenshot of the bank message or the bank app works best.");
+      return;
+    }
+    setPicUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(list[0]); });
+    setPicOpen(false);
     setRows(found);
   };
 
@@ -2025,11 +2249,30 @@ function Home(props) {
                 <span className="filedTick" aria-hidden="true"><Check size={13} /></span>
                 <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>
                   Found {rows.length} {rows.length === 1 ? "transaction" : "transactions"}
+                  {picUrl && (
+                    <span style={{ display: "block", fontSize: 11.5, fontWeight: 400, color: "var(--muted)" }}>
+                      Check each amount against the picture. Tap one to fix it.
+                    </span>
+                  )}
                 </span>
+                {picUrl && (
+                  <button className="icon" style={{ padding: 0 }} onClick={() => setPicOpen(!picOpen)}
+                    aria-label={picOpen ? "Hide the picture" : "Show the picture"}>
+                    <img src={picUrl} alt="" style={{ width: 30, height: 40, objectFit: "cover",
+                      borderRadius: 6, border: "1px solid var(--line)", display: "block" }} />
+                  </button>
+                )}
                 <button className="icon" onClick={() => setRows(null)} aria-label="Discard">
                   <X size={16} />
                 </button>
               </div>
+
+              {picUrl && picOpen && (
+                <div style={{ maxHeight: 300, overflowY: "auto", borderBottom: "1px solid var(--line)",
+                  overscrollBehavior: "contain" }}>
+                  <img src={picUrl} alt="The picture being read" style={{ width: "100%", display: "block" }} />
+                </div>
+              )}
 
               <div className="reviewList">
                 {rows.map((r, i) => {
@@ -2048,11 +2291,21 @@ function Home(props) {
 
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
-                          <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: "hidden",
-                            textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.note}</span>
-                          <span className="num" style={{ fontSize: 13.5, fontWeight: 600,
+                          {/* Both editable: a misread figure or a garbled shop name
+                              is quicker to fix here than after it's saved. */}
+                          <input className="reviewEdit" value={r.note} aria-label="What it was"
+                            onChange={(e) => set({ note: e.target.value.slice(0, 40) })}
+                            style={{ flex: 1, minWidth: 0, fontSize: 13 }} />
+                          <span className="num" style={{ fontSize: 13.5, fontWeight: 600, flex: "none",
                             color: r.kind === "income" ? "var(--leaf)" : undefined }}>
-                            {r.kind === "income" ? "+" : ""}{money(r.amount)}
+                            {r.kind === "income" ? "+" : ""}
+                            <input className="reviewEdit num" inputMode="decimal" aria-label="Amount"
+                              value={r.amountText ?? (Number.isInteger(r.amount) ? String(r.amount) : r.amount.toFixed(2))}
+                              onChange={(e) => set({ amountText: e.target.value,
+                                amount: Number(e.target.value.replace(/,/g, "")) })}
+                              style={{ width: `${Math.max(3, String(r.amountText ?? r.amount.toFixed(2)).length) + 1}ch`,
+                                textAlign: "right", fontWeight: 600, color: "inherit",
+                                borderColor: r.amount > 0 ? undefined : "var(--amber)" }} />
                           </span>
                         </div>
 
@@ -2108,10 +2361,10 @@ function Home(props) {
 
               <div style={{ display: "flex", gap: 8, padding: "11px 12px 12px" }}>
                 <button className="btn gold" style={{ flex: 1 }}
-                  disabled={!rows.some((r) => r.keep)}
+                  disabled={!rows.some((r) => r.keep) || rows.some((r) => r.keep && !(r.amount > 0))}
                   onClick={async () => {
                     const keep = rows.filter((r) => r.keep).map((r) => {
-                      const { keep: _k, ...entry } = r;
+                      const { keep: _k, amountText: _a, ...entry } = r;
                       return { ...entry, categoryId: entry.categoryId || "other" };
                     });
                     const prev = tx;
@@ -2145,6 +2398,13 @@ function Home(props) {
                 aria-label="Paste bank messages" title="Paste bank messages">
                 <ClipboardPaste size={17} />
               </button>
+              <button className="send ghostBtn" onClick={() => picInput.current && picInput.current.click()}
+                disabled={!!reading}
+                aria-label="Read a picture of transactions" title="Read a picture of transactions">
+                {reading ? <Loader2 size={17} className="spin" /> : <Camera size={17} />}
+              </button>
+              <input ref={picInput} type="file" accept="image/*" multiple hidden
+                onChange={(e) => { const f = e.target.files; readPictures(f).finally(() => { e.target.value = ""; }); }} />
               <input value={text} onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
                 placeholder="45 groceries, salary came in…"
@@ -2204,6 +2464,7 @@ function Home(props) {
               <Tip label="How to log something" title="Logging an entry">
                 Type it the way you'd say it — “45 groceries”. Pick the type above,
                 and which card if you used one. Works in English or Arabic.
+                The camera reads a screenshot of your bank messages or bank app.
                 {!aiOn && " Add an API key in Plan for advice."}
               </Tip>
 
@@ -2234,6 +2495,15 @@ function Home(props) {
 
         {pasteMsg && (
           <div className="hint" style={{ color: "var(--amber)" }}>{pasteMsg}</div>
+        )}
+
+        {reading && (
+          <div className="hint">
+            <Loader2 size={11} className="spin" style={{ verticalAlign: -1, marginRight: 5 }} />
+            {reading.pct > 0
+              ? `Reading the picture${reading.of > 1 ? ` ${reading.n} of ${reading.of}` : ""}… ${reading.pct}%`
+              : "Getting the reader ready. The first time takes a little longer."}
+          </div>
         )}
 
         {(err || thinking > 0 || settled) && (
