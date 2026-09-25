@@ -133,6 +133,26 @@ const bankAppTitle = await shot(`<div style="padding:20px 0">
   ${nameRow("Talabat", "Online purchase", "-68.25 AED")}
 </div>`, "bank-app-title.png");
 
+/* Wallet notifications on a lock screen, the layout of a real screenshot
+   that 0.50.1 got wrong: bank on top, shop under it, amount last, white text
+   on dark red and on pale beige in the same picture. Made-up names. */
+const note = (bg, shop, amt, when) => `<div style="margin:0 14px 10px;padding:12px 16px 12px 70px;
+  position:relative;border-radius:22px;background:${bg};color:#fff;font-size:15px;line-height:1.45">
+  <div style="position:absolute;left:14px;top:22px;width:40px;height:40px;border-radius:10px;
+    background:#fff;color:#1b3c8c;font:700 12px sans-serif;display:flex;align-items:center;
+    justify-content:center">GTB</div>
+  <div style="display:flex;justify-content:space-between"><span style="font-weight:600">Gulf Test Bank</span>
+    <span style="opacity:.75">${when}</span></div>
+  <div style="font-weight:600">${shop}</div><div>${amt}</div></div>`;
+const lockScreen = await shot(`<div style="padding:40px 0 30px;background:linear-gradient(#4a1319 0 60%,#8f8068 60%)">
+  <div style="color:#fff;font:600 20px sans-serif;padding:0 26px 18px">07:35</div>
+  ${note("#5e2229", "Falafel Corner", "AED 90.99", "Sun 13:40")}
+  ${note("#5e2229", "Capital Catering Servi", "AED 60.00", "Fri 22:38")}
+  ${note("#5e2229", "Harbour Parking", "AED 40.00", "Fri 21:03")}
+  ${note("#a39479", "Northwind Kiosk", "AED 71.50", "Fri 20:20")}
+  ${note("#a39479", "Northwind Kiosk", "AED 26.00", "Fri 20:00")}
+</div>`, "lock-screen.png", true);
+
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
@@ -197,6 +217,16 @@ console.log("\nREADING A PICTURE");
   ok("names in normal case: amounts exact", JSON.stringify(rows.map((r) => r.amount)) === "[45,22.5,68.25]");
   ok("names in normal case: each row named", rows.map((r) => r.note).join(" | ")
     === "Carrefour Hypermarket | Starbucks Dubai Mall | Talabat", rows.map((r) => r.note).join(" | "));
+}
+{
+  const { rows, msg } = await read(lockScreen);
+  console.log(`         read: ${show(rows) || msg}`);
+  ok("lock screen: every amount exact, pale rows too",
+    JSON.stringify(rows.map((r) => r.amount)) === "[90.99,60,40,71.5,26]", JSON.stringify(rows.map((r) => r.amount)));
+  ok("lock screen: the shop, not the bank", rows.map((r) => r.note).join(" | ")
+    === "Falafel Corner | Capital Catering Servi | Harbour Parking | Northwind Kiosk | Northwind Kiosk",
+    rows.map((r) => r.note).join(" | "));
+  ok("lock screen: days read", rows[0]?.date !== rows[1]?.date, rows.map((r) => r.date).join());
 }
 {
   const pinned = (u) => CDN[u] || /tesseract\.js-core@v7\.0\.0\//.test(u);
