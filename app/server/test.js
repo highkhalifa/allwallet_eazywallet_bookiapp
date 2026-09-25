@@ -31,7 +31,7 @@ const bundle = esbuild.buildSync({
 }).outputFiles[0].text;
 
 const mod = await import("data:text/javascript;base64," + Buffer.from(bundle).toString("base64"));
-const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture } = mod;
+const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture, USD_AED } = mod;
 
 const config = {
   cycleStartDay: 27,
@@ -187,6 +187,27 @@ console.log("\nREADING TEXT FROM A PICTURE");
   ok("a dotted date is not a second amount", dotted.length === 1, `${dotted.length} rows`);
   const jan = parsePicture("Dec 30\nNOON - AED 20.00", config, "2027-01-04");
   ok("a heading with no year in January is last December", jan[0]?.date === "2026-12-30", jan[0]?.date);
+}
+
+console.log("\nPAID IN DOLLARS");
+/* Stored in dirhams at the peg, with the dollar price kept alongside. A
+   dollar figure counted as dirhams would understate the spend by 73%. */
+{
+  ok("the rate is the peg", USD_AED === 3.6725);
+  const a = localParse("$45 lunch", config, "2026-09-02");
+  ok("$45 is 165.26 dirhams", a?.amount === 165.26 && a?.usd === 45, `${a?.amount} ${a?.usd}`);
+  ok("and the note is just the thing", a?.note === "lunch", a?.note);
+  const b = localParse("45 usd lunch", config, "2026-09-02");
+  ok("45 usd works too", b?.amount === 165.26 && b?.usd === 45);
+  ok("so does 20 dollars", localParse("20 dollars netflix", config, "2026-09-02")?.amount === 73.45);
+  const c = localParse("45 lunch", config, "2026-09-02");
+  ok("no currency means dirhams", c?.amount === 45 && !c?.usd);
+  const d = parseAlerts("USD 45.00 has been spent on your card ending 4412 at AMAZON US on 03/09/2026.", config, "2026-09-05")[0];
+  ok("a dollar alert is converted", d?.amount === 165.26 && d?.usd === 45, `${d?.amount}`);
+  const e = parseAlerts("Purchase of USD 45.00 (AED 168.10) at STEAM GAMES on 03/09/2026.", config, "2026-09-05")[0];
+  ok("the dirham charge wins when the bank gives it", e?.amount === 168.1 && e?.usd === 45, `${e?.amount}`);
+  const f = parsePicture("Amazon Web Services\nUSD 12.00", config, "2026-09-05")[0];
+  ok("dollars in a picture", f?.amount === 44.07 && f?.usd === 12, `${f?.amount}`);
 }
 
 console.log("\nDOES IT ACTUALLY RUN");
