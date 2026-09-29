@@ -231,12 +231,15 @@ export function localParse(raw, config, today) {
     const n = String(inc.name || "").toLowerCase().trim();
     if (n.length > 2) scanText = scanText.split(n).join(" ");
   }
-  const nums = scanText.match(/\d+(?:[.,]\d+)?/g);
+  /* "1,250" is twelve hundred and fifty. Read as 1.25 it was a figure a
+     thousand times too small that nothing would question. A comma is still
+     a decimal point in "12,5". */
+  const nums = scanText.match(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?/g);
 
   /* No amount typed? If the words name an income source you've already set up
      in Plan, use the figure from there. "salary came in" is a complete
      sentence to a person, so it should be one to the app. */
-  let amount = nums ? Number(nums[0].replace(",", ".")) : 0;
+  let amount = nums ? Number(/,\d{3}/.test(nums[0]) ? nums[0].replace(/,/g, "") : nums[0].replace(",", ".")) : 0;
   let fromPlan = null;
   if (!(amount > 0)) {
     const match = (config.incomes || []).find((i) => {
@@ -299,7 +302,7 @@ export function localParse(raw, config, today) {
   }
 
   const note = raw
-    .replace(/\d+(?:[.,]\d+)?/g, "")
+    .replace(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?/g, "")
     .replace(/\b(aed|dhs?|dirhams?|درهم|دراهم|usd|dollars?|دولار)\b|\$/gi, "")
     .replace(/\s+/g, " ").trim().slice(0, 40);
 
@@ -645,6 +648,122 @@ export function parsePicture(raw, config, today) {
       ? { ...r, keep: false, doubt: true } : r);
 }
 
+/* The words of a note worth remembering a category by. */
+export const learnWords = (note) => String(note || "").toLowerCase()
+  .replace(/[^a-z؀-ۿ\s]/g, " ").split(/\s+/).filter((w) => w.length > 3);
+
+/* ---------- the inbox: entries caught outside the app ---------- */
+
+/* Logging something means unlocking the phone, finding the app, and typing —
+   enough steps that "later" wins, and later rarely comes. So capture happens
+   without the app: an iPhone Shortcuts automation runs on every Apple Pay tap
+   and adds a line to a text file, and a "Spent" shortcut (Back Tap, Siri)
+   adds a typed or spoken one. The app reads that file whenever you get round
+   to it and shows only what's new.
+
+   One line per entry, fields split by "|", in any order:
+     2026-09-29T13:40:00+04:00 | AED 45.00 | Carrefour | FAB Debit    (Apple Pay)
+     2026-09-29T13:40:00+04:00 | 45 groceries                         (Spent)
+   Shortcuts writes the amount in whatever format the phone's region uses, so
+   the fields are recognised by what they look like, not where they are. */
+const INBOX_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+                       jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+function inboxDate(f) {
+  let m = f.match(/\b(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = f.match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})/);            // 29 Sep 2026
+  if (m && INBOX_MONTHS[m[2].slice(0, 3).toLowerCase()]) {
+    return `${m[3]}-${pad(INBOX_MONTHS[m[2].slice(0, 3).toLowerCase()])}-${pad(Number(m[1]))}`;
+  }
+  m = f.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/);             // Sep 29, 2026
+  if (m && INBOX_MONTHS[m[1].slice(0, 3).toLowerCase()]) {
+    return `${m[3]}-${pad(INBOX_MONTHS[m[1].slice(0, 3).toLowerCase()])}-${pad(Number(m[2]))}`;
+  }
+  m = f.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);                        // 29/09/2026
+  if (m) return `${m[3]}-${pad(Number(m[2]))}-${pad(Number(m[1]))}`;
+  return "";
+}
+
+/* A field that is only a price: "AED 45.00", "45.00 AED", "د.إ.‏ 45.00",
+   "$12.00". Words beyond the currency mean it's a note like "45 groceries". */
+function inboxAmount(f) {
+  const cur = /AED|د\.?إ\.?|DHS?|USD|US\$|\$/i;
+  if (!cur.test(f)) return null;
+  const rest = f.replace(/AED|د\.?إ\.?|DHS?|USD|US\$|\$|[\s‎‏ ,.\d+\-−]/gi, "");
+  if (rest.length > 0) return null;
+  // the number itself: the dots in "د.إ." belong to the currency, not the figure
+  const n = (f.match(/\d[\d,]*(?:\.\d+)?/) || [""])[0];
+  const value = Number(/,\d{2}$/.test(n) && !/\./.test(n) ? n.replace(",", ".") : n.replace(/,/g, ""));
+  if (!(value > 0)) return null;
+  return /USD|US\$|\$/i.test(f) ? { amount: toAed(value), usd: value } : { amount: value, usd: 0 };
+}
+
+export function parseInbox(raw, config, today) {
+  const cards = config.cards || [];
+  const cardFor = (f) => cards.find((k) => {
+    const first = String(k.name || "").toLowerCase().split(" ")[0];
+    return first.length > 2 && f.toLowerCase().includes(first);
+  });
+  const out = [];
+  for (const line of String(raw).split(/\r?\n/)) {
+    const key = line.replace(/\s+/g, " ").trim();
+    if (!key.includes("|")) continue;
+    const fields = key.split("|").map((f) => f.trim()).filter(Boolean);
+    let date = "", price = null, card = null;
+    const words = [];
+    for (const f of fields) {
+      // a date has few letters: "29 Sep 2026 at 13:40", not "dinner on 29 Sep 2026"
+      if (!date && inboxDate(f) && f.replace(/[^A-Za-z]/g, "").length <= 14) {
+        date = inboxDate(f); continue;
+      }
+      const p = inboxAmount(f);
+      if (!price && p) { price = p; continue; }
+      if (!card && cardFor(f) && words.length) { card = cardFor(f); continue; }
+      words.push(f);
+    }
+    date = date && date <= today ? date : today;
+
+    let row;
+    if (price) {
+      // Apple Pay: the price and the shop arrive separately and exactly
+      const note = (words[0] || "").slice(0, 40);
+      const guess = localParse(`${price.amount} ${note}`, config, date);
+      row = { kind: "expense", amount: price.amount, note,
+        categoryId: guess ? guess.catId : "other",
+        src: card ? "card" : "bank", cardId: card ? card.id : "" };
+      if (price.usd) row.usd = price.usd;
+    } else {
+      // typed or spoken into the Spent shortcut: read it like the typing box
+      const said = words.join(" ");
+      const g = localParse(said, config, date);
+      if (!g) continue;
+      const named = cardFor(said);
+      row = g.isCardPay
+        ? { kind: "cardpay", categoryId: "__cardpay", src: "bank", cardId: named ? named.id : (cards[0] || {}).id || "" }
+        : g.isIncome
+          ? { kind: "income", categoryId: "__income", src: "bank", cardId: "" }
+          : { kind: "expense", categoryId: g.catId, src: g.src === "card" && named ? "card" : "bank",
+              cardId: g.src === "card" && named ? named.id : "" };
+      Object.assign(row, { amount: g.amount, note: g.note }, g.usd ? { usd: g.usd } : {});
+    }
+    out.push({ ...row, date, key, guessCat: row.categoryId, id: `${Date.now()}-i${out.length}`, keep: true });
+  }
+  return out;
+}
+
+/* The same purchase can arrive twice — logged by hand at the till, then again
+   from the inbox, or from a screenshot. A duplicate doubles real spending
+   without looking wrong, so anything matching an entry already saved (same
+   amount, within a day) is left unticked with a note saying why. */
+export function markLogged(rows, tx) {
+  return rows.map((r) => {
+    const twin = tx.find((t) => t.kind === r.kind && Math.abs(Number(t.amount) - r.amount) < 0.01
+      && Math.abs(dayCount(t.date, r.date)) <= 1);
+    return twin ? { ...r, keep: false, logged: twin.note || "an entry" } : r;
+  });
+}
+
 let ocrLoading = null;
 function loadOcr() {
   if (window.Tesseract) return Promise.resolve(window.Tesseract);
@@ -923,6 +1042,13 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.52.0", items: [
+    "Log without opening the app: your iPhone can write down every Apple Pay purchase by itself, and a “Spent” shortcut takes cash in two seconds. Setup is in Plan → Settings",
+    "The camera button also opens that list. Only what's new appears, and it doesn't come back once added",
+    "Anything that looks already logged (same amount, within a day) comes up unticked, so nothing is counted twice",
+    "Categories you correct while reviewing are remembered for next time",
+    "Fixed: “1,250” was read as 1.25",
+  ]},
   { v: "0.51.0", items: [
     "Paid in dollars? Type “$45 lunch” or “45 usd lunch” and it's saved in dirhams at the fixed rate of 3.6725",
     "The dollar price stays with the entry and shows next to it in History",
@@ -1297,6 +1423,12 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
   color:inherit;padding:0 0 1px;outline:none;border-radius:0;}
 .reviewEdit::placeholder{color:var(--amber);opacity:1;}
 .reviewEdit:focus{border-bottom:1px solid var(--gold);}
+.howTo{font-size:13px;line-height:1.5;color:var(--sand);}
+.howTo ol{margin:4px 0 12px;padding-left:20px;}
+.howTo li{margin:3px 0;color:var(--muted);}
+.howTo li b{color:var(--sand);font-weight:600;}
+.howTo code{font-size:12px;background:var(--card2);border:1px solid var(--line);
+  border-radius:5px;padding:0 4px;color:var(--sand);white-space:nowrap;}
 .tickBox{width:19px;height:19px;border-radius:6px;display:flex;align-items:center;
   justify-content:center;border:1.5px solid var(--line);color:var(--leather);}
 .tickBox[data-on="1"]{border-color:var(--leaf);background:var(--leaf);}
@@ -1759,13 +1891,15 @@ function Home(props) {
       setPasteMsg("Nothing on the clipboard. Copy your bank messages first.");
       return;
     }
-    const found = parseAlerts(text, config, cycleToday);
+    const inbox = await openInbox(text);
+    if (inbox && !inbox.length) { setPasteMsg("Nothing new in your inbox since last time."); return; }
+    const found = inbox || parseAlerts(text, config, cycleToday);
     if (!found.length) {
       setPasteMsg("Couldn't find any amounts in that. Paste the message text itself.");
       return;
     }
     setPicUrl("");
-    setRows(found);
+    setRows(markLogged(found, tx));
   };
 
   /* A picture goes through the same review as pasted messages: reading
@@ -1776,12 +1910,42 @@ function Home(props) {
   const [picOpen, setPicOpen] = useState(false);
   const picInput = useRef(null);
 
+  const readSeen = async () => {
+    try { const r = await storage.get("wallet-inbox-seen"); return r?.value ? JSON.parse(r.value) : []; }
+    catch (e) { return []; }
+  };
+  // capped: the file only grows, but a year of lines is plenty to remember
+  const writeSeen = (keys) =>
+    storage.set("wallet-inbox-seen", JSON.stringify([...new Set(keys)].slice(-4000))).catch(() => {});
+
+  /* Only lines not already reviewed, and anything already saved is unticked. */
+  const openInbox = async (text) => {
+    const all = parseInbox(text, config, cycleToday);
+    if (!all.length) return null;
+    const seen = new Set(await readSeen());
+    return all.filter((r) => !seen.has(r.key));
+  };
+
   const readPictures = async (files) => {
-    const list = Array.from(files || []).filter((f) => /^image\//.test(f.type) || !f.type);
-    if (!list.length) return;
+    const picked = Array.from(files || []);
+    const texts = picked.filter((f) => /^text\//.test(f.type) || /\.txt$/i.test(f.name || ""));
+    const list = picked.filter((f) => !texts.includes(f) && (/^image\//.test(f.type) || !f.type));
+    if (!list.length && !texts.length) return;
     setPasteMsg("");
     setRows(null);
     const found = [];
+    if (texts.length) {
+      const inbox = await openInbox((await Promise.all(texts.map((f) => f.text()))).join("\n"));
+      if (inbox === null) {
+        setPasteMsg("That file has no entries in it. The inbox file is the one your Shortcuts add lines to.");
+        return;
+      }
+      if (!inbox.length && !list.length) {
+        setPasteMsg("Nothing new in your inbox since last time.");
+        return;
+      }
+      found.push(...inbox);
+    }
     try {
       for (let n = 0; n < list.length; n++) {
         setReading({ n: n + 1, of: list.length, pct: 0 });
@@ -1801,9 +1965,9 @@ function Home(props) {
       setPasteMsg("Couldn't find any amounts in that picture. A clear screenshot of the bank message or the bank app works best.");
       return;
     }
-    setPicUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(list[0]); });
+    setPicUrl((old) => { if (old) URL.revokeObjectURL(old); return list.length ? URL.createObjectURL(list[0]) : ""; });
     setPicOpen(false);
-    setRows(found);
+    setRows(markLogged(found, tx));
   };
 
   const text = draft;
@@ -1993,6 +2157,8 @@ function Home(props) {
     if (!toast) return;
     await saveTx(toast.prevTx);
     if (toast.prevConfig) await saveConfig(toast.prevConfig);
+    // undone entries go back in the inbox, or they'd be lost from both places
+    if (toast.prevSeen) writeSeen(toast.prevSeen);
     setToast(null);
   };
 
@@ -2503,6 +2669,11 @@ function Home(props) {
                             little more for the exchange, change the amount to match.
                           </div>
                         )}
+                        {r.logged && (
+                          <div style={{ fontSize: 11, color: "var(--amber)", marginTop: 3 }}>
+                            Looks already logged as “{r.logged}”. Tick it if this is a second one.
+                          </div>
+                        )}
                         {r.doubt && (
                           <div style={{ fontSize: 11, color: "var(--amber)", marginTop: 3 }}>
                             No fils on this one, unlike the rest. Check the amount, then tick it.
@@ -2516,6 +2687,11 @@ function Home(props) {
 
                           {/* The parser reads the direction from the wording, which
                               differs between banks. One tap corrects it. */}
+                          {r.kind === "cardpay" ? (
+                            <span className="miniTag" data-src="card">
+                              repaid{card ? ` ${card.name}` : ""}
+                            </span>
+                          ) : (
                           <button className="miniTag" data-kind={r.kind}
                             onClick={() => set({
                               kind: r.kind === "income" ? "expense" : "income",
@@ -2525,8 +2701,9 @@ function Home(props) {
                             })}>
                             {r.kind === "income" ? "money in" : "money out"}
                           </button>
+                          )}
 
-                          {r.kind !== "income" && (
+                          {r.kind === "expense" && (
                             <>
                               <button className="miniTag" data-src={r.src === "card" ? "card" : "bank"}
                                 onClick={() => {
@@ -2567,15 +2744,33 @@ function Home(props) {
                   disabled={!rows.some((r) => r.keep) || rows.some((r) => r.keep && !(r.amount > 0))}
                   onClick={async () => {
                     const keep = rows.filter((r) => r.keep).map((r) => {
-                      const { keep: _k, amountText: _a, doubt: _d, ...entry } = r;
+                      const { keep: _k, amountText: _a, doubt: _d, key: _key, guessCat: _g,
+                        logged: _l, ...entry } = r;
                       return { ...entry, categoryId: entry.categoryId || "other",
                         note: String(entry.note || "").trim()
                           || (entry.kind === "income" ? "Money in" : "Expense") };
                     });
                     const prev = tx;
                     await saveTx([...keep, ...tx]);
+
+                    /* A category you fixed here is one you'd have to fix again
+                       next time. Remembered, so the inbox gets closer to one
+                       tap on Add. */
+                    const taught = rows.filter((r) => r.keep && r.kind === "expense"
+                      && r.guessCat && r.categoryId !== r.guessCat);
+                    if (taught.length) {
+                      const learned = { ...(config.learned || {}) };
+                      taught.forEach((r) => learnWords(r.note).forEach((w) => { learned[w] = r.categoryId; }));
+                      await saveConfig({ ...config, learned });
+                    }
+
+                    // lines looked at here, added or skipped, don't come back
+                    const prevSeen = await readSeen();
+                    const fresh = rows.map((r) => r.key).filter(Boolean);
+                    if (fresh.length) writeSeen([...prevSeen, ...fresh]);
+
                     setRows(null);
-                    setToast({ prevTx: prev, prevConfig: config,
+                    setToast({ prevTx: prev, prevConfig: config, prevSeen: fresh.length ? prevSeen : null,
                       filed: { icon: "out", text: `Added ${keep.length} ${keep.length === 1 ? "entry" : "entries"}` } });
                     dismissToast();
                   }}>
@@ -2605,10 +2800,10 @@ function Home(props) {
               </button>
               <button className="send ghostBtn" onClick={() => picInput.current && picInput.current.click()}
                 disabled={!!reading}
-                aria-label="Read a picture of transactions" title="Read a picture of transactions">
+                aria-label="Read a picture or your inbox" title="Read a picture or your inbox">
                 {reading ? <Loader2 size={17} className="spin" /> : <Camera size={17} />}
               </button>
-              <input ref={picInput} type="file" accept="image/*" multiple hidden
+              <input ref={picInput} type="file" accept="image/*,text/plain,.txt" multiple hidden
                 onChange={(e) => { const f = e.target.files; readPictures(f).finally(() => { e.target.value = ""; }); }} />
               <input value={text} onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
@@ -3664,6 +3859,43 @@ function Setup(props) {
           </div>
         </Fold>
 
+        {/* Logging loses to "later" when it takes unlocking, finding the app
+            and typing. These shortcuts catch spending without opening the app,
+            and the inbox is read here whenever it suits. */}
+        <Fold title="Log without opening the app" hint="iPhone Shortcuts">
+          <div className="empty" style={{ padding: "0 0 10px" }}>
+            Your iPhone can write down each purchase for you. The app reads the list
+            whenever you get round to it and shows only what's new.
+          </div>
+          <div className="howTo">
+            <b>1 · Every Apple Pay tap, automatically</b>
+            <ol>
+              <li>Open <b>Shortcuts</b> → <b>Automation</b> → <b>+</b> → <b>Transaction</b>.</li>
+              <li>Pick your cards, choose <b>Run Immediately</b>, then <b>Next</b> → <b>New Blank Automation</b>.</li>
+              <li>Add the action <b>Append to Text File</b>. For the file, type <code>wallet-inbox.txt</code>.</li>
+              <li>In the text, add in this order, with <code> | </code> between each:
+                <b> Current Date</b>, <b>Amount</b>, <b>Merchant</b>, <b>Card</b>.
+                (Tap the text box and pick them from the list above the keyboard.)</li>
+              <li>Turn on <b>Make New Line</b>. Done.</li>
+            </ol>
+            <b>2 · Cash and anything else, in two seconds</b>
+            <ol>
+              <li>New shortcut called <b>Spent</b>: add <b>Ask for Input</b> (“What did you spend?”),
+                then <b>Append to Text File</b> into <code>wallet-inbox.txt</code> with
+                <b> Current Date</b> <code>|</code> <b>Provided Input</b>, and <b>Make New Line</b> on.</li>
+              <li>Put it on <b>Back Tap</b> (Settings → Accessibility → Touch → Back Tap → Double Tap),
+                the Action button, or just say “Hey Siri, Spent”. Then say “45 groceries”.</li>
+            </ol>
+            <b>3 · When you feel like it</b>
+            <ol>
+              <li>Tap the camera next to the typing box → <b>Choose File</b> → <b>Shortcuts</b> →
+                <code>wallet-inbox.txt</code>. Only new lines appear; anything you've already
+                logged comes up unticked. Check, then <b>Add</b>.</li>
+              <li>Categories you correct are remembered, so it gets closer to one tap each time.</li>
+            </ol>
+          </div>
+        </Fold>
+
         <Fold title="AI" hint={getDeviceKey() ? `On · ${getProvider() || "openai"}` : "Off — using the offline matcher"}>
           <div className="empty" style={{ padding: "0 0 12px" }}>
             Your key stays on this phone and is sent straight to the provider you pick.
@@ -3996,9 +4228,7 @@ export default function SpendingWallet() {
   /* Correcting an entry teaches the word, so the matcher learns your merchants
      rather than relying on a list someone else guessed at. */
   const learn = (note, catId) => {
-    const words = String(note || "").toLowerCase()
-      .replace(/[^a-z؀-ۿ\s]/g, " ").split(/\s+/)
-      .filter((w) => w.length > 3);
+    const words = learnWords(note);
     if (!words.length || !catId) return;
     const learned = { ...(config.learned || {}) };
     words.forEach((w) => { learned[w] = catId; });
