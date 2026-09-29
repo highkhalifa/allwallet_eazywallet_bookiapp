@@ -1,12 +1,12 @@
 {
   "name": "wallet",
   "private": true,
-  "version": "0.52.0",
+  "version": "0.53.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node server/bundle-single.js",
-    "test": "node server/test.js && node server/test-picture.js"
+    "test": "node server/test.js && node server/test-chart.js && node server/test-picture.js"
   },
   "dependencies": {
     "lucide-react": "0.383.0",

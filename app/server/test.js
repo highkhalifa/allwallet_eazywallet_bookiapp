@@ -31,7 +31,7 @@ const bundle = esbuild.buildSync({
 }).outputFiles[0].text;
 
 const mod = await import("data:text/javascript;base64," + Buffer.from(bundle).toString("base64"));
-const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture, USD_AED, parseInbox, markLogged } = mod;
+const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture, USD_AED, parseInbox, markLogged, controlLimits, judgeDay } = mod;
 
 const config = {
   cycleStartDay: 27,
@@ -249,6 +249,28 @@ console.log("\nTHE INBOX");
   const marked = markLogged(r, [{ kind: "expense", amount: 45, date: "2026-09-28", note: "carrefour" }]);
   ok("something already saved is unticked", marked[0]?.keep === false && marked[0]?.logged === "carrefour");
   ok("everything else stays ticked", marked.slice(1).every((x) => x.keep));
+}
+
+console.log("\nCONTROL CHART");
+/* Worked by hand, so the code is checked against arithmetic, not itself.
+   A: 100 50 200 80 120 → mean 110; moving ranges 50 150 120 40 → 90;
+      UCL 110 + 2.66×90 = 349.4; LCL 110 − 239.4 < 0 → 0.
+   B: 100 110 90 105 95 → mean 100; ranges 10 20 15 10 → 13.75;
+      UCL 136.575; LCL 63.425. */
+{
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  const a = controlLimits([100, 50, 200, 80, 120]);
+  ok("average", near(a.mean, 110), String(a.mean));
+  ok("average moving range", near(a.mrBar, 90), String(a.mrBar));
+  ok("upper limit = average + 2.66 × moving range", near(a.ucl, 349.4), String(a.ucl));
+  ok("a lower limit below zero sits at zero", a.lcl === 0 && a.lclRaw < 0);
+  const b = controlLimits([100, 110, 90, 105, 95]);
+  ok("steady spending: tight limits", near(b.ucl, 136.575) && near(b.lcl, 63.425), `${b.ucl} ${b.lcl}`);
+  ok("above the upper limit", judgeDay(140, b) === "above");
+  ok("below the lower limit", judgeDay(60, b) === "below");
+  ok("inside is normal", judgeDay(100, b) === "normal" && judgeDay(136.5, b) === "normal");
+  ok("one day isn't enough", controlLimits([100]) === null && controlLimits([]) === null);
+  ok("zero-spend days count as days", near(controlLimits([0, 100, 0]).mean, 100 / 3));
 }
 
 console.log("\nDOES IT ACTUALLY RUN");
