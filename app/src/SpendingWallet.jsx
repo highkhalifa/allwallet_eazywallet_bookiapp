@@ -84,6 +84,28 @@ function Dh({ size = "1em", style }) {
   );
 }
 
+/* ---------- is today unusual? ---------- */
+
+/* An XmR (individuals) control chart over daily spending. The limits come
+   from your own day-to-day variation, not from a budget: a day outside them
+   is a special cause worth a look, a day inside is ordinary noise however it
+   compares with the plan. 2.66 is the standard XmR constant (3 / d2, d2 =
+   1.128 for ranges of two). Only finished days go in — a day still in
+   progress, or not yet started, would drag the average down. */
+export function controlLimits(values) {
+  const n = values.length;
+  if (n < 2) return null;
+  const mean = values.reduce((a, v) => a + v, 0) / n;
+  let mr = 0;
+  for (let i = 1; i < n; i++) mr += Math.abs(values[i] - values[i - 1]);
+  const mrBar = mr / (n - 1);
+  const lclRaw = mean - 2.66 * mrBar;
+  return { n, mean, mrBar, ucl: mean + 2.66 * mrBar, lcl: Math.max(0, lclRaw), lclRaw };
+}
+
+export const judgeDay = (amount, lim) =>
+  !lim ? null : amount > lim.ucl ? "above" : amount < lim.lcl ? "below" : "normal";
+
 /* ---------- dates ---------- */
 
 /* Whole months between two dates, used to work out which slice of an
@@ -1042,6 +1064,12 @@ export function paymentsMade(tx, plan) {
    mystery. The update prompt can't use this — it can only describe the build
    doing the reading, never the one arriving. */
 const CHANGELOG = [
+  { v: "0.53.0", items: [
+    "The daily bars have a second view: a control chart. Switch with Budget / Control chart above the bars",
+    "It draws your average day and the upper and lower limits of your normal day-to-day variation, worked out from the days already finished this cycle",
+    "A day outside the limits turns red with a ▲ or ▼. Drag across the bars to see each day's amount and whether it was normal",
+    "The budget line stays, dashed and grey. Tap the line key to see how the limits are worked out",
+  ]},
   { v: "0.52.0", items: [
     "Log without opening the app: your iPhone can write down every Apple Pay purchase by itself, and a “Spent” shortcut takes cash in two seconds. Setup is in Plan → Settings",
     "The camera button also opens that list. Only what's new appears, and it doesn't come back once added",
@@ -1146,9 +1174,9 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sofia+Sans:wght@400;500;600;700&display=swap');
 
 :root,.app{--leather:#101314;--card:#191D1E;--card2:#212627;--line:#2E3436;
-  --sand:#E8E9E7;--muted:#8B9391;--gold:#4FCB98;--flare:#F0705B;--leaf:#4FCB98;--amber:#E5A93F;}
+  --sand:#E8E9E7;--muted:#8B9391;--gold:#4FCB98;--flare:#F0705B;--leaf:#4FCB98;--amber:#E5A93F;--ctl:#6A93D4;}
 :root.light,.app.light{--leather:#F2F0EA;--card:#FFFFFF;--card2:#F7F5F0;--line:#E2DED4;
-  --sand:#1A2124;--muted:#6E7573;--gold:#1F8F68;--flare:#C0432E;--leaf:#1F8F68;--amber:#A9701A;}
+  --sand:#1A2124;--muted:#6E7573;--gold:#1F8F68;--flare:#C0432E;--leaf:#1F8F68;--amber:#A9701A;--ctl:#2F64B3;}
 
 *{box-sizing:border-box;}
 .app{min-height:100vh;background:var(--leather);color:var(--sand);
@@ -1198,6 +1226,27 @@ button,.chip,.segBtn,.foldHead,.panelHead,.statCard,label{-webkit-user-select:no
 .tick{flex:1;min-width:0;border-radius:2px 2px 0 0;transition:opacity .12s,transform .12s;}
 .tick.picked{transform:scaleY(1.06);filter:brightness(1.15);}
 .paceline{position:absolute;left:0;right:0;border-top:1px dashed var(--muted);opacity:.6;}
+/* control chart: its own colour, solid for the average and dotted for the
+   limits, so none of them can be mistaken for the dashed grey budget line */
+.spark.tall{height:92px;margin-top:18px;}
+.sparkHead{display:flex;justify-content:flex-end;margin-top:14px;}
+.sparkHead .seg{width:auto;}
+.sparkHead .segBtn{white-space:nowrap;padding:5px 10px !important;font-size:11.5px !important;}
+.sparkHead + .spark{margin-top:18px;}
+.ctlLine{position:absolute;left:0;right:0;pointer-events:none;z-index:2;}
+.ctlLine.mean{border-top:1.5px solid var(--ctl);}
+.ctlLine.limit{border-top:1.5px dotted var(--ctl);}
+.specialMark{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(100% + 1px);
+  font-size:7px;line-height:1;color:var(--flare);}
+.verdict{font-size:10px;font-weight:600;color:var(--leaf) !important;}
+.verdict.above,.verdict.below{color:var(--flare) !important;}
+.ctlKey{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:8px;padding:0;
+  background:none;border:none;font:inherit;font-size:11px;color:var(--muted);text-align:left;cursor:pointer;}
+.ctlKey b{color:var(--sand);font-weight:500;}
+.ctlKey .sw{display:inline-block;width:14px;height:0;vertical-align:middle;margin-right:5px;}
+.ctlKey .sw.mean{border-top:1.5px solid var(--ctl);}
+.ctlKey .sw.limit{border-top:1.5px dotted var(--ctl);}
+.ctlKey .sw.budget{border-top:1px dashed var(--muted);}
 .sparkFoot{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-top:7px;}
 .scrubLine{position:absolute;top:-4px;bottom:-2px;width:2px;transform:translateX(-50%);
   background:var(--sand);opacity:.35;border-radius:2px;pointer-events:none;z-index:2;}
@@ -1764,6 +1813,13 @@ function Home(props) {
 
   const [maths, setMaths] = useState(null);
   const [scrub, setScrub] = useState(null);
+  const [sparkView, setSparkView] = useState("budget");   // "budget" | "control"
+  useEffect(() => {
+    storage.get("wallet-spark-view")
+      .then((r) => { if (r?.value === "control") setSparkView("control"); })
+      .catch(() => {});
+  }, []);
+  const pickSparkView = (v) => { setSparkView(v); storage.set("wallet-spark-view", v).catch(() => {}); };
   const [splitOpen, setSplitOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [flagsOpen, setFlagsOpen] = useState(false);
@@ -2072,7 +2128,19 @@ function Home(props) {
   }, [m.inCycle, tx, cycle, today]);
 
   const pace = m.budget > 0 ? m.budget / cycle.days : (m.income > 0 ? m.income / cycle.days : 0);
-  const sparkMax = Math.max(pace * 1.6, ...spark.map((s) => s.amount), 1);
+  // days before today only: today is still going and later days haven't happened
+  const limits = useMemo(() => controlLimits(spark.filter((s) => s.iso < today).map((s) => s.amount)),
+    [spark, today]);
+  const control = sparkView === "control" && !!limits;
+  /* The control view's scale has to reach the upper limit, or the one line
+     that matters most sits off the top of the chart. */
+  /* ...and only days that have happened: a purchase dated next week drew as a
+     3px stub but still set the scale, flattening every real bar. */
+  const sparkMax = control
+    ? Math.max(pace * 1.08, limits.ucl * 1.1, ...spark.filter((s) => !s.future).map((s) => s.amount), 1)
+    : Math.max(pace * 1.6, ...spark.map((s) => s.amount), 1);
+  const lineAt = (v) => `${Math.min(96, (v / sparkMax) * 100)}%`;
+  const verdict = (s) => (s.future || !limits ? null : judgeDay(s.amount, limits));
 
   const pickDay = (clientX, el) => {
     const b = el.getBoundingClientRect();
@@ -2163,6 +2231,21 @@ function Home(props) {
   };
 
   const MATHS = {
+    ...(limits ? { control: {
+      title: "Control limits",
+      rows: [
+        { label: `Days counted (${fmtDay(spark[0].iso)} to yesterday)`, value: String(limits.n) },
+        { label: "Average a day", value: money(limits.mean) },
+        { label: "Average change from one day to the next", value: money(limits.mrBar) },
+        { label: `Upper limit: ${money(limits.mean)} + 2.66 × ${money(limits.mrBar)}`, value: money(limits.ucl), total: true },
+        { label: `Lower limit: ${money(limits.mean)} − 2.66 × ${money(limits.mrBar)}`,
+          value: limits.lclRaw < 0 ? "0" : money(limits.lcl), total: true },
+      ],
+      note: <>A day between the limits is ordinary variation in how you spend. A day outside
+        them is unusual enough to have a reason worth knowing. Today and later days aren't
+        counted until they're over.{limits.lclRaw < 0 ? " The lower limit works out below zero, so it sits at zero." : ""}
+        {limits.n < 10 ? " With under ten days in, the limits will still move a fair bit." : ""}</>,
+    } } : {}),
     left: {
       title: "Left to spend",
       rows: [
@@ -2283,9 +2366,9 @@ function Home(props) {
       )}
 
       <Maths open={!!maths} onClose={() => setMaths(null)}
-        title={maths ? MATHS[maths].title : ""}
-        rows={maths ? MATHS[maths].rows : []}
-        note={maths ? MATHS[maths].note : null} />
+        title={maths && MATHS[maths] ? MATHS[maths].title : ""}
+        rows={maths && MATHS[maths] ? MATHS[maths].rows : []}
+        note={maths && MATHS[maths] ? MATHS[maths].note : null} />
 
       {confirmPay !== null && createPortal(
         <div onClick={() => setConfirmPay(null)}
@@ -2376,7 +2459,19 @@ function Home(props) {
             : <>All your planned income has arrived</>}
         </div>
 
-        <div className="spark" data-owns-drag
+        {/* Two readings of the same bars: against the budget, or against your
+            own normal day-to-day variation. */}
+        <div className="sparkHead">
+          <div className="seg segSm" role="tablist" aria-label="Chart view">
+            {[["budget", "Budget"], ["control", "Control chart"]].map(([id, label]) => (
+              <button key={id} role="tab" aria-selected={sparkView === id}
+                className={`segBtn ${sparkView === id ? "on" : ""}`}
+                onClick={() => pickSparkView(id)}>{label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className={`spark ${control ? "tall" : ""}`} data-owns-drag
           onTouchStart={(e) => {
             sparkTouch.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, axis: null };
             pickDay(e.touches[0].clientX, e.currentTarget);
@@ -2395,7 +2490,14 @@ function Home(props) {
           }}
           onTouchEnd={() => setScrub(null)} onTouchCancel={() => setScrub(null)}
         >
-          <div className="paceline" style={{ bottom: `${Math.min(96, (pace / sparkMax) * 100)}%` }} />
+          <div className="paceline" style={{ bottom: lineAt(pace) }} />
+          {control && (
+            <>
+              <div className="ctlLine limit" style={{ bottom: lineAt(limits.ucl) }} />
+              <div className="ctlLine mean" style={{ bottom: lineAt(limits.mean) }} />
+              {limits.lcl > 0 && <div className="ctlLine limit" style={{ bottom: lineAt(limits.lcl) }} />}
+            </>
+          )}
           {scrub !== null && spark[scrub] && (
             <>
               <div className="scrubLine" style={{ left: `${((scrub + 0.5) / spark.length) * 100}%` }} />
@@ -2403,22 +2505,42 @@ function Home(props) {
                 left: `${Math.min(88, Math.max(12, ((scrub + 0.5) / spark.length) * 100))}%` }}>
                 <b className="num">{spark[scrub].future ? "—" : money(spark[scrub].amount)}</b>
                 <span>{fmtDay(spark[scrub].iso)}</span>
+                {control && verdict(spark[scrub]) && (
+                  <span className={`verdict ${verdict(spark[scrub])}`}>
+                    {verdict(spark[scrub]) === "above" ? "▲ Above upper limit"
+                      : verdict(spark[scrub]) === "below" ? "▼ Below lower limit"
+                      : spark[scrub].isToday ? "Normal so far" : "Normal"}
+                  </span>
+                )}
               </div>
             </>
           )}
-          {spark.map((s, i) => (
-            <div key={s.iso} className={`tick ${scrub === i ? "picked" : ""}`}
-              style={{ height: s.future ? "3px" : `${Math.max(3, (s.amount / sparkMax) * 100)}%`,
-                background: s.future ? "var(--card2)" : s.amount > pace ? "var(--flare)"
-                  : s.isToday ? "var(--gold)" : "var(--leaf)",
-                opacity: s.future ? 1 : scrub !== null && scrub !== i ? .3 : s.amount === 0 ? .35 : 1 }} />
-          ))}
+          {spark.map((s, i) => {
+            /* In the control view red means outside your limits, not over
+               the budget; a marker says which way, so it isn't colour alone. */
+            const v = control ? verdict(s) : null;
+            const special = v === "above" || v === "below";
+            return (
+              <div key={s.iso} className={`tick ${scrub === i ? "picked" : ""}`}
+                style={{ height: s.future ? "3px" : `${Math.max(3, (s.amount / sparkMax) * 100)}%`,
+                  background: s.future ? "var(--card2)"
+                    : control ? (special ? "var(--flare)" : s.isToday ? "var(--gold)" : "var(--leaf)")
+                    : s.amount > pace ? "var(--flare)" : s.isToday ? "var(--gold)" : "var(--leaf)",
+                  opacity: s.future ? 1 : scrub !== null && scrub !== i ? .3 : s.amount === 0 ? .35 : 1 }}>
+                {special && <span className={`specialMark ${v}`} aria-hidden="true">{v === "above" ? "▲" : "▼"}</span>}
+              </div>
+            );
+          })}
         </div>
         <div className="sparkFoot">
           {scrub !== null && spark[scrub] ? (
             <>
               <span><b style={{ color: "var(--sand)" }}>{fmtDay(spark[scrub].iso)}</b></span>
               <span>{spark[scrub].future ? "hasn't happened yet"
+                : control ? <><Dh />{money(spark[scrub].amount)}{
+                    verdict(spark[scrub]) === "above" ? <span style={{ color: "var(--flare)" }}> · ▲ above the upper limit</span>
+                    : verdict(spark[scrub]) === "below" ? <span style={{ color: "var(--flare)" }}> · ▼ below the lower limit</span>
+                    : <span style={{ color: "var(--leaf)" }}> · within normal range</span>}</>
                 : <><Dh />{money(spark[scrub].amount)}{spark[scrub].amount > pace
                     ? <span style={{ color: "var(--flare)" }}> · over pace</span>
                     : <span style={{ color: "var(--leaf)" }}> · under pace</span>}</>}</span>
@@ -2427,6 +2549,21 @@ function Home(props) {
             <><span>Spent today: <Dh />{money(m.spentToday)}</span><span>Drag across the bars</span></>
           )}
         </div>
+
+        {/* The key doubles as the way into the arithmetic, like every other figure. */}
+        {sparkView === "control" && (limits ? (
+          <button className="ctlKey" onClick={() => setMaths("control")} aria-label="How are the limits worked out?">
+            <span><i className="sw limit" />Upper limit <b className="num">{money(limits.ucl)}</b></span>
+            <span><i className="sw mean" />Average <b className="num">{money(limits.mean)}</b></span>
+            <span><i className="sw limit" />Lower limit <b className="num">{money(limits.lcl)}</b></span>
+            {pace > 0 && <span><i className="sw budget" />Budget <b className="num">{money(pace)}</b></span>}
+            <Info size={12} />
+          </button>
+        ) : (
+          <div className="ctlKey" style={{ cursor: "default" }}>
+            The control chart needs two finished days in this cycle. Check back tomorrow.
+          </div>
+        ))}
       </div>
 
       <div className="sect" style={{ marginTop: 14, display: "grid",
