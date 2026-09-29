@@ -31,7 +31,7 @@ const bundle = esbuild.buildSync({
 }).outputFiles[0].text;
 
 const mod = await import("data:text/javascript;base64," + Buffer.from(bundle).toString("base64"));
-const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture, USD_AED } = mod;
+const { localParse, computeMetrics, splitPlan, parseAlerts, parsePicture, USD_AED, parseInbox, markLogged } = mod;
 
 const config = {
   cycleStartDay: 27,
@@ -208,6 +208,47 @@ console.log("\nPAID IN DOLLARS");
   ok("the dirham charge wins when the bank gives it", e?.amount === 168.1 && e?.usd === 45, `${e?.amount}`);
   const f = parsePicture("Amazon Web Services\nUSD 12.00", config, "2026-09-05")[0];
   ok("dollars in a picture", f?.amount === 44.07 && f?.usd === 12, `${f?.amount}`);
+}
+
+console.log("\nTHOUSANDS");
+/* "1,250" read as 1.25 — a figure a thousand times too small, and plausible. */
+ok("1,250 rent is 1250", localParse("1,250 rent", config, "2026-09-02")?.amount === 1250);
+ok("12,500.50 is 12500.5", localParse("12,500.50 furniture", config, "2026-09-02")?.amount === 12500.5);
+ok("12,5 is still 12.5", localParse("12,5 coffee", config, "2026-09-02")?.amount === 12.5);
+ok("and the note loses the whole number", localParse("1,250 rent", config, "2026-09-02")?.note === "rent");
+
+console.log("\nTHE INBOX");
+/* Lines written by the iPhone Shortcuts: an Apple Pay automation and a
+   "Spent" shortcut. Region settings change how the amount and date look. */
+{
+  const inbox = [
+    "2026-09-27T13:40:00+04:00 | AED 45.00 | Carrefour | FAB Debit",
+    "2026-09-27T20:31:00+04:00 | 60.00 AED | Capital Catering | ADIB Covered Card",
+    "28 Sep 2026 at 9:12 | د.إ.‏ 1,250.50 | IKEA | FAB Debit",
+    "Sep 28, 2026 at 10:00 PM | $12.00 | Netflix.com | FAB Debit",
+    "2026-09-29T08:00:00+04:00 | 25 coffee",
+    "2026-09-29T08:05:00+04:00 | paid tabby 500",
+    "2026-09-29T08:06:00+04:00 | salary came in",
+    "a line with no bars is not an entry",
+  ].join("\n");
+  const r = parseInbox(inbox, config, "2026-09-29");
+  ok("one row per line with bars", r.length === 7, `${r.length}`);
+  ok("Apple Pay: amount, shop, date", r[0]?.amount === 45 && r[0]?.note === "Carrefour" && r[0]?.date === "2026-09-27");
+  ok("the shop picks the category", r[0]?.categoryId === "groceries", r[0]?.categoryId);
+  ok("amount written after the currency", r[1]?.amount === 60);
+  ok("a card you track is put on that card", r[1]?.src === "card" && r[1]?.cardId === "adib");
+  ok("a card you don't track is paid from the bank", r[0]?.src === "bank" && !r[0]?.cardId);
+  ok("the dirham sign and a thousands comma", r[2]?.amount === 1250.5 && r[2]?.note === "IKEA", `${r[2]?.amount} ${r[2]?.note}`);
+  ok("a long-form date", r[2]?.date === "2026-09-28" && r[3]?.date === "2026-09-28");
+  ok("dollars converted", r[3]?.amount === 44.07 && r[3]?.usd === 12);
+  ok("a spoken entry is read like typing", r[4]?.amount === 25 && r[4]?.categoryId === "groceries");
+  ok("a repayment stays a repayment", r[5]?.kind === "cardpay" && r[5]?.cardId === "tabby" && r[5]?.categoryId === "__cardpay");
+  ok("money in stays money in", r[6]?.kind === "income" && r[6]?.amount === 15000);
+  ok("each line keeps its own key", new Set(r.map((x) => x.key)).size === 7);
+
+  const marked = markLogged(r, [{ kind: "expense", amount: 45, date: "2026-09-28", note: "carrefour" }]);
+  ok("something already saved is unticked", marked[0]?.keep === false && marked[0]?.logged === "carrefour");
+  ok("everything else stays ticked", marked.slice(1).every((x) => x.keep));
 }
 
 console.log("\nDOES IT ACTUALLY RUN");

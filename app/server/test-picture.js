@@ -163,13 +163,13 @@ await page.evaluate((c) => {
   localStorage.setItem("wallet:wallet-transactions", "[]");
 }, config);
 await page.reload();
-await page.waitForSelector('input[type=file][accept="image/*"]', { state: "attached" });
+await page.waitForSelector('input[type=file][accept^="image/*"]', { state: "attached" });
 
 const read = async (file, keepOpen = false) => {
-  await page.setInputFiles('input[type=file][accept="image/*"]', file);
+  await page.setInputFiles('input[type=file][accept^="image/*"]', file);
   await page.waitForSelector(".reviewBox, .hint", { timeout: 120000 });
   await page.waitForFunction(() => document.querySelector(".reviewBox")
-    || [...document.querySelectorAll(".hint")].some((h) => /Couldn't/.test(h.textContent)), null, { timeout: 120000 });
+    || [...document.querySelectorAll(".hint")].some((h) => /Couldn't|Nothing new|no entries/.test(h.textContent)), null, { timeout: 120000 });
   const rows = await page.$$eval(".reviewRow", (els) => els.map((el) => ({
     note: el.querySelector('input[aria-label="What it was"]').value,
     amount: Number(el.querySelector('input[aria-label="Amount"]').value.replace(/,/g, "")),
@@ -229,6 +229,31 @@ console.log("\nREADING A PICTURE");
     rows.map((r) => r.note).join(" | "));
   ok("lock screen: days read", rows[0]?.date !== rows[1]?.date, rows.map((r) => r.date).join());
 }
+console.log("\nTHE INBOX, THROUGH THE APP");
+/* The file the Shortcuts write, picked with the same button. Added once, it
+   doesn't come back; undone, it does. */
+{
+  const file = path.join(root, "node_modules", ".cache", "wallet-inbox.txt");
+  fs.writeFileSync(file, [
+    "2026-09-20T13:40:00+04:00 | AED 45.00 | Carrefour | FAB Debit",
+    "2026-09-21T09:00:00+04:00 | 25 coffee",
+  ].join("\n") + "\n");
+  const first = await read(file, true);
+  ok("inbox: both lines listed", first.rows.length === 2, show(first.rows));
+  await page.click(".reviewBox .btn.gold");
+  await page.waitForSelector(".filedRow");
+  const again = await read(file);
+  ok("inbox: nothing comes back once added", again.rows.length === 0 && /Nothing new/.test(again.msg), again.msg);
+
+  fs.appendFileSync(file, "2026-09-22T19:00:00+04:00 | AED 30.00 | ADNOC 1 | FAB Debit\n");
+  const more = await read(file, true);
+  ok("inbox: a new line shows on its own", more.rows.length === 1 && more.rows[0].amount === 30, show(more.rows));
+  await page.click(".reviewBox .btn.gold");
+  await page.click(".filedUndo");
+  const back = await read(file);
+  ok("inbox: undo puts it back", back.rows.length === 1 && back.rows[0].amount === 30, show(back.rows) || back.msg);
+}
+
 console.log("\nCHOOSING A CATEGORY BY TOUCH");
 /* A real finger drag, sent as touch input, on the row of categories. In 0.50.2
    the tab swipe took it and the whole page slid to the Cards tab. */
@@ -236,6 +261,13 @@ console.log("\nCHOOSING A CATEGORY BY TOUCH");
   await read(bankAppTitle, true);
   const box = () => page.$eval(".reviewBox", (el) => el.getBoundingClientRect().left);
   const row = await page.$(".reviewRow .catScroll");
+  await row.evaluate((el) => el.scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(300);
+  // a finger that misses the row would pass the first check without testing anything
+  const onRow = await row.evaluate((el) => { const b = el.getBoundingClientRect();
+    const top = document.elementFromPoint(b.right - 10, b.top + b.height / 2);
+    return !!(top && el.contains(top)); });
+  ok("the finger is on the category row", onRow);
   const r = await row.boundingBox();
   const before = { left: await box(), scroll: await row.evaluate((el) => el.scrollLeft) };
   const cdp = await context.newCDPSession(page);
